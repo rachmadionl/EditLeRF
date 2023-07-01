@@ -9,7 +9,8 @@ dependencies=[
     "regex",
     "tqdm",
     "clip @ git+https://github.com/openai/CLIP.git",
-    "nerfstudio>=0.3.0"
+    "nerfstudio>=0.3.0",
+    "torchtyping"
 ]
 
 [tool.setuptools.packages.find]
