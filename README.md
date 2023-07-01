@@ -1,17 +1,22 @@
-# LERF: Language Embedded Radiance Fields
+<!-- # LERF: Language Embedded Radiance Fields
 This is the official implementation for [LERF](https://lerf.io).
 
 
 <div align='center'>
 <img src="https://www.lerf.io/data/nerf_render.svg" height="230px">
-</div>
+</div> -->
+
+# LERF: Language Embedding Radiance Fields
+Please refer to the official [implementation](https://github.com/kerrj/lerf) for more info.
 
 # Installation
-LERF follows the integration guidelines described [here](https://docs.nerf.studio/en/latest/developer_guides/new_methods.html) for custom methods within Nerfstudio. 
+
 ### 0. Install Nerfstudio dependencies
-[Follow these instructions](https://docs.nerf.studio/en/latest/quickstart/installation.html) up to and including "tinycudann" to install dependencies and create an environment
+- Install [PyTorch 2.0](https://pytorch.org/) with CUDA.
+- Install `tiny-cuda-nn`
+`pip install ninja git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch`
 ### 1. Clone this repo
-`git clone https://github.com/kerrj/lerf`
+`git clone https://github.com/rachmadionl/EditLeRF`
 ### 2. Install this repo as a python package
 Navigate to this folder and run `python -m pip install -e .`
 
