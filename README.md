@@ -13,7 +13,7 @@ Please refer to the official [implementation](https://github.com/kerrj/lerf) for
 
 ### 0. Install Nerfstudio dependencies
 - Install [PyTorch 2.0](https://pytorch.org/) with CUDA.
-- Install `tiny-cuda-nn`
+- Install `tiny-cuda-nn`:
 `pip install ninja git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch`
 ### 1. Clone this repo
 `git clone https://github.com/rachmadionl/EditLeRF`
