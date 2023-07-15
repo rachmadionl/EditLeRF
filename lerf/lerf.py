@@ -11,7 +11,6 @@ from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.model_components.ray_samplers import PDFSampler
 from nerfstudio.model_components.renderers import DepthRenderer
-from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig
 from nerfstudio.utils.colormaps import ColormapOptions, apply_colormap
 from nerfstudio.viewer.server.viewer_elements import *
 from torch.nn import Parameter
@@ -20,6 +19,7 @@ from lerf.encoders.image_encoder import BaseImageEncoder
 from lerf.lerf_field import LERFField
 from lerf.lerf_fieldheadnames import LERFFieldHeadNames
 from lerf.lerf_renderers import CLIPRenderer, MeanRenderer
+from lerf.mip_nerfacto import NerfactoModel, NerfactoModelConfig
 
 
 @dataclass
