@@ -15,19 +15,21 @@ from nerfstudio.utils.colormaps import ColormapOptions, apply_colormap
 from nerfstudio.viewer.server.viewer_elements import *
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler, UniformSampler
+from nerfstudio.utils import colors
 from torch.nn import Parameter
 
 from lerf.encoders.image_encoder import BaseImageEncoder
 from lerf.lerf_field import LERFField
 from lerf.lerf_fieldheadnames import LERFFieldHeadNames
 from lerf.lerf_renderers import CLIPRenderer, MeanRenderer
-from nerfstudio.models.mipnerf import MipNerfModel
-from nerfstudio.models.vanilla_nerf import VanillaModelConfig
+from nerfstudio.models.tensorf import TensoRFModelConfig, TensoRFModel
+# from nerfstudio.models.mipnerf import MipNerfModel
+# from nerfstudio.models.vanilla_nerf import VanillaModelConfig
 # from lerf.mip_nerfacto import NerfactoModel, NerfactoModelConfig
 
 
 @dataclass
-class LERFModelConfig(VanillaModelConfig):
+class LERFModelConfig(TensoRFModelConfig):
     _target: Type = field(default_factory=lambda: LERFModel)
     clip_loss_weight: float = 0.1
     n_scales: int = 30
@@ -77,9 +79,13 @@ class LERFModelConfig(VanillaModelConfig):
     """Number of samples per ray for the nerf network."""
     num_proposal_samples_per_ray: Tuple[int, ...] = (256, 96)
     """Number of samples per ray for each proposal network."""
+    proposal_warmup: int = 5000
+    """Scales n from 1 to proposal_update_every over this many steps"""
+    proposal_update_every: int = 5
+    """Sample every n steps after the warmup"""
 
 
-class LERFModel(MipNerfModel):
+class LERFModel(TensoRFModel):
     config: LERFModelConfig
 
     def populate_modules(self):
@@ -96,59 +102,60 @@ class LERFModel(MipNerfModel):
             clip_n_dims=self.image_encoder.embedding_dim,
         )
 
-        # if self.config.disable_scene_contraction:
-        #     scene_contraction = None
-        # else:
-        #     scene_contraction = SceneContraction(order=float("inf"))
+        if self.config.disable_scene_contraction:
+            scene_contraction = None
+        else:
+            scene_contraction = SceneContraction(order=float("inf"))
 
-        # self.density_fns = []
-        # num_prop_nets = self.config.num_proposal_iterations
-        # # Build the proposal network(s)
-        # self.proposal_networks = torch.nn.ModuleList()
-        # if self.config.use_same_proposal_network:
-        #     assert len(self.config.proposal_net_args_list) == 1, "Only one proposal network is allowed."
-        #     prop_net_args = self.config.proposal_net_args_list[0]
-        #     network = HashMLPDensityField(
-        #         self.scene_box.aabb,
-        #         spatial_distortion=scene_contraction,
-        #         **prop_net_args,
-        #         implementation=self.config.implementation,
-        #     )
-        #     self.proposal_networks.append(network)
-        #     self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
-        # else:
-        #     for i in range(num_prop_nets):
-        #         prop_net_args = self.config.proposal_net_args_list[min(i, len(self.config.proposal_net_args_list) - 1)]
-        #         network = HashMLPDensityField(
-        #             self.scene_box.aabb,
-        #             spatial_distortion=scene_contraction,
-        #             **prop_net_args,
-        #             implementation=self.config.implementation,
-        #         )
-        #         self.proposal_networks.append(network)
-        #     self.density_fns.extend([network.density_fn for network in self.proposal_networks])
+        self.density_fns = []
+        num_prop_nets = self.config.num_proposal_iterations
+        # Build the proposal network(s)
+        self.proposal_networks = torch.nn.ModuleList()
+        if self.config.use_same_proposal_network:
+            assert len(self.config.proposal_net_args_list) == 1, "Only one proposal network is allowed."
+            prop_net_args = self.config.proposal_net_args_list[0]
+            network = HashMLPDensityField(
+                self.scene_box.aabb,
+                spatial_distortion=scene_contraction,
+                **prop_net_args,
+                implementation=self.config.implementation,
+            )
+            self.proposal_networks.append(network)
+            self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
+        else:
+            for i in range(num_prop_nets):
+                prop_net_args = self.config.proposal_net_args_list[min(i, len(self.config.proposal_net_args_list) - 1)]
+                network = HashMLPDensityField(
+                    self.scene_box.aabb,
+                    spatial_distortion=scene_contraction,
+                    **prop_net_args,
+                    implementation=self.config.implementation,
+                )
+                self.proposal_networks.append(network)
+            self.density_fns.extend([network.density_fn for network in self.proposal_networks])
 
-        # # Samplers
-        # def update_schedule(step):
-        #     return np.clip(
-        #         np.interp(step, [0, self.config.proposal_warmup], [0, self.config.proposal_update_every]),
-        #         1,
-        #         self.config.proposal_update_every,
-        #     )
+        # Samplers
+        def update_schedule(step):
+            return np.clip(
+                np.interp(step, [0, self.config.proposal_warmup], [0, self.config.proposal_update_every]),
+                1,
+                self.config.proposal_update_every,
+            )
 
-        # # Change proposal network initial sampler if uniform
-        # initial_sampler = None  # None is for piecewise as default (see ProposalNetworkSampler)
-        # if self.config.proposal_initial_sampler == "uniform":
-        #     initial_sampler = UniformSampler(single_jitter=self.config.use_single_jitter)
+        # Change proposal network initial sampler if uniform
+        initial_sampler = None  # None is for piecewise as default (see ProposalNetworkSampler)
+        if self.config.proposal_initial_sampler == "uniform":
+            initial_sampler = UniformSampler(single_jitter=self.config.use_single_jitter)
 
-        # self.proposal_sampler = ProposalNetworkSampler(
-        #     num_nerf_samples_per_ray=self.config.num_nerf_samples_per_ray,
-        #     num_proposal_samples_per_ray=self.config.num_proposal_samples_per_ray,
-        #     num_proposal_network_iterations=self.config.num_proposal_iterations,
-        #     single_jitter=self.config.use_single_jitter,
-        #     update_sched=update_schedule,
-        #     initial_sampler=initial_sampler,
-        # )
+        self.proposal_sampler = ProposalNetworkSampler(
+            num_nerf_samples_per_ray=self.config.num_nerf_samples_per_ray,
+            num_proposal_samples_per_ray=self.config.num_proposal_samples_per_ray,
+            num_proposal_network_iterations=self.config.num_proposal_iterations,
+            single_jitter=self.config.use_single_jitter,
+            update_sched=update_schedule,
+            initial_sampler=initial_sampler,
+        )
+
         # populate some viewer logic
         # TODO use the values from this code to select the scale
         # def scale_cb(element):
@@ -266,8 +273,13 @@ class LERFModel(MipNerfModel):
         # ray_samples = self.sampler_uniform(ray_bundle)
         # ray_samples_list.append(ray_bundle)
 
-        outputs, weights_list, ray_samples_list, weights, ray_samples = self._get_outputs_mipnerf(ray_bundle)
+        # ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
+        # outputs, weights_list, ray_samples_list, weights, ray_samples = self._get_outputs_mipnerf(ray_bundle)
+        outputs, weights, ray_samples, weights_list, ray_samples_list = self._get_outputs_tensorf(ray_bundle,
+                                                                                                  self.density_fns)
         lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
+        # import pdb; pdb.set_trace()
+        weights_list.append(weights)
 
         def gather_fn(tens):
             return torch.gather(tens, -2, best_ids.expand(*best_ids.shape[:-1], tens.shape[-1]))
@@ -434,6 +446,41 @@ class LERFModel(MipNerfModel):
             "depth_fine": depth_fine,
         }
         return outputs, weights_list, ray_samples_list, weights_fine, ray_samples_pdf
+
+    def _get_outputs_tensorf(self, ray_bundle: RayBundle, density_fns):
+        ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
+        # uniform sampling
+        # ray_samples_uniform = self.sampler_uniform(ray_bundle)
+        dens = self.field.get_density(ray_samples)
+        weights = ray_samples.get_weights(dens)
+        weights_list.append(weights)
+        coarse_accumulation = self.renderer_accumulation(weights)
+        acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
+
+        # pdf sampling
+        ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
+        ray_samples_list.append(ray_samples_pdf)
+
+        # fine field:
+        field_outputs_fine = self.field.forward(
+            ray_samples_pdf, mask=None, bg_color=None
+        )
+
+        weights_fine = ray_samples_pdf.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
+
+        accumulation = self.renderer_accumulation(weights_fine)
+        depth = self.renderer_depth(weights_fine, ray_samples)
+
+        rgb = self.renderer_rgb(
+            rgb=field_outputs_fine[FieldHeadNames.RGB],
+            weights=weights_fine,
+        )
+
+        rgb = torch.where(accumulation < 0, colors.WHITE.to(rgb.device), rgb)
+        accumulation = torch.clamp(accumulation, min=0)
+
+        outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
+        return outputs, weights, ray_samples, weights_list, ray_samples_list
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = super().get_loss_dict(outputs, batch, metrics_dict)
