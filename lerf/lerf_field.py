@@ -11,6 +11,8 @@ from nerfstudio.cameras.rays import RaySamples
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.field_components.activations import trunc_exp
 from nerfstudio.field_components.field_heads import FieldHeadNames
+from nerfstudio.field_components.encodings import HashEncoding
+from nerfstudio.field_components.mlp import MLP
 from nerfstudio.field_components.spatial_distortions import (
     SceneContraction,
     SpatialDistortion,
@@ -18,9 +20,10 @@ from nerfstudio.field_components.spatial_distortions import (
 from nerfstudio.fields.base_field import Field
 
 try:
+    TCNN_EXISTS = True
     import tinycudann as tcnn
 except ImportError:
-    pass
+    TCNN_EXISTS = False
 
 
 class LERFField(Field):
@@ -43,44 +46,67 @@ class LERFField(Field):
             ]
         )
         tot_out_dims = sum([e.n_output_dims for e in self.clip_encs])
-
-        self.clip_net = tcnn.Network(
-            n_input_dims=tot_out_dims + 1,
-            n_output_dims=clip_n_dims,
-            network_config={
-                "otype": "CutlassMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": 256,
-                "n_hidden_layers": 4,
-            },
+        implementation = 'tcnn' if TCNN_EXISTS else 'torch'
+        # self.clip_net = tcnn.Network(
+        #     n_input_dims=tot_out_dims + 1,
+        #     n_output_dims=clip_n_dims,
+        #     network_config={
+        #         "otype": "CutlassMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 256,
+        #         "n_hidden_layers": 4,
+        #     },
+        # )
+        self.clip_net = MLP(
+            in_dim=tot_out_dims + 1,
+            out_dim=clip_n_dims,
+            num_layers=4,
+            layer_width=256,
+            implementation=implementation
         )
 
-        self.dino_net = tcnn.Network(
-            n_input_dims=tot_out_dims,
-            n_output_dims=384,
-            network_config={
-                "otype": "CutlassMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": 256,
-                "n_hidden_layers": 1,
-            },
+        # self.dino_net = tcnn.Network(
+        #     n_input_dims=tot_out_dims,
+        #     n_output_dims=384,
+        #     network_config={
+        #         "otype": "CutlassMLP",
+        #         "activation": "ReLU",
+        #         "output_activation": "None",
+        #         "n_neurons": 256,
+        #         "n_hidden_layers": 1,
+        #     },
+        # )
+        self.clip_net = MLP(
+            in_dim=tot_out_dims,
+            out_dim=384,
+            num_layers=1,
+            layer_width=256,
+            implementation=implementation
         )
 
     @staticmethod
     def _get_encoding(start_res, end_res, levels, indim=3, hash_size=19):
-        growth = np.exp((np.log(end_res) - np.log(start_res)) / (levels - 1))
-        enc = tcnn.Encoding(
-            n_input_dims=indim,
-            encoding_config={
-                "otype": "HashGrid",
-                "n_levels": levels,
-                "n_features_per_level": 8,
-                "log2_hashmap_size": hash_size,
-                "base_resolution": start_res,
-                "per_level_scale": growth,
-            },
+        implementation = 'tcnn' if TCNN_EXISTS else 'torch'
+        # growth = np.exp((np.log(end_res) - np.log(start_res)) / (levels - 1))
+        # enc = tcnn.Encoding(
+        #     n_input_dims=indim,
+        #     encoding_config={
+        #         "otype": "HashGrid",
+        #         "n_levels": levels,
+        #         "n_features_per_level": 8,
+        #         "log2_hashmap_size": hash_size,
+        #         "base_resolution": start_res,
+        #         "per_level_scale": growth,
+        #     },
+        # )
+        enc = HashEncoding(
+            num_levels=levels,
+            min_res=start_res,
+            max_res=end_res,
+            log2_hashmap_size=hash_size,
+            features_per_level=8,
+            implementation=implementation
         )
         return enc
 
