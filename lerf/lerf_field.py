@@ -77,7 +77,7 @@ class LERFField(Field):
         #         "n_hidden_layers": 1,
         #     },
         # )
-        self.clip_net = MLP(
+        self.dino_net = MLP(
             in_dim=tot_out_dims,
             out_dim=384,
             num_layers=1,
@@ -133,7 +133,7 @@ class LERFField(Field):
 
     def get_output_from_hashgrid(self, ray_samples: RaySamples, hashgrid_field, scale):
         # designated scales, run outputs for each scale
-        hashgrid_field = hashgrid_field.view(-1, self.clip_net.n_input_dims - 1)
+        hashgrid_field = hashgrid_field.view(-1, self.clip_net.in_dim - 1)
         clip_pass = self.clip_net(torch.cat([hashgrid_field, scale.view(-1, 1)], dim=-1)).view(
             *ray_samples.frustums.shape, -1
         )
