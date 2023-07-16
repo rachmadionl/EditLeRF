@@ -45,7 +45,7 @@ class LERFField(Field):
                 ) for i in range(len(grid_layers))
             ]
         )
-        tot_out_dims = sum([e.n_output_dims for e in self.clip_encs])
+        tot_out_dims = sum([e.get_out_dim() for e in self.clip_encs])
         implementation = 'tcnn' if TCNN_EXISTS else 'torch'
         # self.clip_net = tcnn.Network(
         #     n_input_dims=tot_out_dims + 1,
