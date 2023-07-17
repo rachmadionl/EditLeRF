@@ -5,6 +5,8 @@ from typing import Dict, Literal, List, Tuple, Type
 import numpy as np
 import open_clip
 import torch
+import nerfacc
+
 from nerfstudio.cameras.rays import RayBundle, RaySamples
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.field_components.field_heads import FieldHeadNames
@@ -15,6 +17,7 @@ from nerfstudio.utils.colormaps import ColormapOptions, apply_colormap
 from nerfstudio.viewer.server.viewer_elements import *
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler, UniformSampler
+from nerfstudio.model_components.scene_colliders import NearFarCollider
 from nerfstudio.utils import colors
 from torch.nn import Parameter
 
@@ -22,7 +25,9 @@ from lerf.encoders.image_encoder import BaseImageEncoder
 from lerf.lerf_field import LERFField
 from lerf.lerf_fieldheadnames import LERFFieldHeadNames
 from lerf.lerf_renderers import CLIPRenderer, MeanRenderer
-from nerfstudio.models.tensorf import TensoRFModelConfig, TensoRFModel
+
+from lerf.tensorf import TensoRFModelConfig, TensoRFModel
+from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig
 # from nerfstudio.models.mipnerf import MipNerfModel
 # from nerfstudio.models.vanilla_nerf import VanillaModelConfig
 # from lerf.mip_nerfacto import NerfactoModel, NerfactoModelConfig
@@ -83,6 +88,8 @@ class LERFModelConfig(TensoRFModelConfig):
     """Scales n from 1 to proposal_update_every over this many steps"""
     proposal_update_every: int = 5
     """Sample every n steps after the warmup"""
+    near_plane = 2.0
+    far_plane = 6.0
 
 
 class LERFModel(TensoRFModel):
@@ -90,7 +97,6 @@ class LERFModel(TensoRFModel):
 
     def populate_modules(self):
         super().populate_modules()
-
         self.renderer_clip = CLIPRenderer()
         self.renderer_mean = MeanRenderer()
 
@@ -156,6 +162,7 @@ class LERFModel(TensoRFModel):
             initial_sampler=initial_sampler,
         )
 
+        # self.collider = NearFarCollider(near_plane=self.config.near_plane, far_plane=self.config.far_plane)
         # populate some viewer logic
         # TODO use the values from this code to select the scale
         # def scale_cb(element):
@@ -273,10 +280,15 @@ class LERFModel(TensoRFModel):
         # ray_samples = self.sampler_uniform(ray_bundle)
         # ray_samples_list.append(ray_bundle)
 
+        # ray_bundle = self.collider(ray_bundle)
         # ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
+        # ray_samples_list.append(ray_samples)
+
+        # nerfacto_field_outputs, outputs, weights = self._get_outputs_nerfacto(ray_samples)
         # outputs, weights_list, ray_samples_list, weights, ray_samples = self._get_outputs_mipnerf(ray_bundle)
         outputs, weights, ray_samples, weights_list, ray_samples_list = self._get_outputs_tensorf(ray_bundle,
                                                                                                   self.density_fns)
+        # outputs, weights, _, _, _ = self._get_outputs_instant_ngp(ray_bundle)
         lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
         # import pdb; pdb.set_trace()
         weights_list.append(weights)
@@ -469,7 +481,7 @@ class LERFModel(TensoRFModel):
         weights_fine = ray_samples_pdf.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
 
         accumulation = self.renderer_accumulation(weights_fine)
-        depth = self.renderer_depth(weights_fine, ray_samples)
+        depth = self.renderer_depth(weights_fine, ray_samples_pdf)
 
         rgb = self.renderer_rgb(
             rgb=field_outputs_fine[FieldHeadNames.RGB],

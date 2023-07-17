@@ -46,6 +46,7 @@ class LERFField(Field):
             ]
         )
         tot_out_dims = sum([e.get_out_dim() for e in self.clip_encs])
+        # tot_out_dims = sum([e.n_output_dims for e in self.clip_encs])
         implementation = 'tcnn' if TCNN_EXISTS else 'torch'
         # self.clip_net = tcnn.Network(
         #     n_input_dims=tot_out_dims + 1,
@@ -88,7 +89,7 @@ class LERFField(Field):
     @staticmethod
     def _get_encoding(start_res, end_res, levels, indim=3, hash_size=19):
         implementation = 'tcnn' if TCNN_EXISTS else 'torch'
-        # growth = np.exp((np.log(end_res) - np.log(start_res)) / (levels - 1))
+        growth = np.exp((np.log(end_res) - np.log(start_res)) / (levels - 1))
         # enc = tcnn.Encoding(
         #     n_input_dims=indim,
         #     encoding_config={
@@ -134,6 +135,7 @@ class LERFField(Field):
     def get_output_from_hashgrid(self, ray_samples: RaySamples, hashgrid_field, scale):
         # designated scales, run outputs for each scale
         hashgrid_field = hashgrid_field.view(-1, self.clip_net.in_dim - 1)
+        # hashgrid_field = hashgrid_field.view(-1, self.clip_net.n_input_dims - 1)
         clip_pass = self.clip_net(torch.cat([hashgrid_field, scale.view(-1, 1)], dim=-1)).view(
             *ray_samples.frustums.shape, -1
         )
