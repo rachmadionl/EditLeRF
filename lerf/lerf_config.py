@@ -61,6 +61,10 @@ lerf_method = MethodSpecification(
                 "optimizer": RAdamOptimizerConfig(lr=1e-2, eps=1e-15),
                 "scheduler": ExponentialDecaySchedulerConfig(lr_final=1e-3, max_steps=30000),
             },
+            "encodings": {
+                "optimizer": AdamOptimizerConfig(lr=0.02),
+                "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.002, max_steps=30000),
+            },
             "lerf": {
                 "optimizer": RAdamOptimizerConfig(lr=1e-2, eps=1e-15, weight_decay=1e-9),
                 "scheduler": ExponentialDecaySchedulerConfig(lr_final=1e-3, max_steps=4000),
@@ -147,10 +151,10 @@ lerf_method_lite = MethodSpecification(
             ),
         ),
         optimizers={
-            # "proposal_networks": {
-            #     "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            #     "scheduler": None,
-            # },
+            "proposal_networks": {
+                "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
+                "scheduler": None,
+            },
             # "fields": {
             #     "optimizer": RAdamOptimizerConfig(lr=1e-2, eps=1e-15),
             #     "scheduler": ExponentialDecaySchedulerConfig(lr_final=1e-3, max_steps=30000),

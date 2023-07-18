@@ -43,7 +43,12 @@ from nerfstudio.field_components.encodings import (
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from lerf.tensorf_field import TensoRFField
-from nerfstudio.model_components.losses import MSELoss, tv_loss
+from nerfstudio.model_components.losses import (
+    MSELoss,
+    tv_loss,
+    distortion_loss,
+    interlevel_loss,
+)
 from nerfstudio.model_components.ray_samplers import PDFSampler, UniformSampler
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
@@ -168,6 +173,7 @@ class TensoRFModel(Model):
         return callbacks
 
     def update_to_step(self, step: int) -> None:
+        import pdb; pdb.set_trace()
         if step < self.upsampling_iters[0]:
             return
 
@@ -301,6 +307,14 @@ class TensoRFModel(Model):
         outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
         return outputs
 
+    def get_metrics_dict(self, outputs, batch):
+        metrics_dict = {}
+        image = batch["image"].to(self.device)
+        metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
+        if self.training:
+            metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
+        return metrics_dict
+
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
         # Scaling metrics by coefficients to create the losses.
         device = outputs["rgb"].device
@@ -329,36 +343,12 @@ class TensoRFModel(Model):
             raise ValueError(f"Regularization {self.config.regularization} not supported")
 
         loss_dict = misc.scale_dict(loss_dict, self.config.loss_coefficients)
+
+        if self.training:
+            loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
+                outputs["weights_list"], outputs["ray_samples_list"]
+            )
+            assert metrics_dict is not None and "distortion" in metrics_dict
+            loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
+
         return loss_dict
-
-    def get_image_metrics_and_images(
-        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
-    ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
-        image = batch["image"].to(outputs["rgb"].device)
-        rgb = outputs["rgb"]
-        acc = colormaps.apply_colormap(outputs["accumulation"])
-        assert self.config.collider_params is not None
-        depth = colormaps.apply_depth_colormap(
-            outputs["depth"],
-            accumulation=outputs["accumulation"],
-            near_plane=self.config.collider_params["near_plane"],
-            far_plane=self.config.collider_params["far_plane"],
-        )
-
-        combined_rgb = torch.cat([image, rgb], dim=1)
-
-        # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
-        image = torch.moveaxis(image, -1, 0)[None, ...]
-        rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
-
-        psnr = self.psnr(image, rgb)
-        ssim = cast(torch.Tensor, self.ssim(image, rgb))
-        lpips = self.lpips(image, rgb)
-
-        metrics_dict = {
-            "psnr": float(psnr.item()),
-            "ssim": float(ssim.item()),
-            "lpips": float(lpips.item()),
-        }
-        images_dict = {"img": combined_rgb, "accumulation": acc, "depth": depth}
-        return metrics_dict, images_dict

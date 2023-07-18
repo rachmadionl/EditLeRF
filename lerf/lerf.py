@@ -1,6 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Literal, List, Tuple, Type
+from typing import Dict, Literal, List, Tuple, Type, cast
 
 import numpy as np
 import open_clip
@@ -18,7 +18,7 @@ from nerfstudio.viewer.server.viewer_elements import *
 from nerfstudio.fields.density_fields import HashMLPDensityField
 from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler, UniformSampler
 from nerfstudio.model_components.scene_colliders import NearFarCollider
-from nerfstudio.utils import colors
+from nerfstudio.utils import colors, colormaps
 from torch.nn import Parameter
 
 from lerf.encoders.image_encoder import BaseImageEncoder
@@ -90,6 +90,7 @@ class LERFModelConfig(TensoRFModelConfig):
     """Sample every n steps after the warmup"""
     near_plane = 2.0
     far_plane = 6.0
+    predict_normals = False
 
 
 class LERFModel(TensoRFModel):
@@ -291,7 +292,7 @@ class LERFModel(TensoRFModel):
         # outputs, weights, _, _, _ = self._get_outputs_instant_ngp(ray_bundle)
         lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
         # import pdb; pdb.set_trace()
-        weights_list.append(weights)
+
 
         def gather_fn(tens):
             return torch.gather(tens, -2, best_ids.expand(*best_ids.shape[:-1], tens.shape[-1]))
@@ -461,6 +462,7 @@ class LERFModel(TensoRFModel):
 
     def _get_outputs_tensorf(self, ray_bundle: RayBundle, density_fns):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
+        ray_samples_list.append(ray_samples)
         # uniform sampling
         # ray_samples_uniform = self.sampler_uniform(ray_bundle)
         dens = self.field.get_density(ray_samples)
@@ -471,7 +473,7 @@ class LERFModel(TensoRFModel):
 
         # pdf sampling
         ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
-        ray_samples_list.append(ray_samples_pdf)
+        # ray_samples_list.append(ray_samples_pdf)
 
         # fine field:
         field_outputs_fine = self.field.forward(
@@ -479,6 +481,7 @@ class LERFModel(TensoRFModel):
         )
 
         weights_fine = ray_samples_pdf.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
+        # weights_list.append(weights_fine)
 
         accumulation = self.renderer_accumulation(weights_fine)
         depth = self.renderer_depth(weights_fine, ray_samples_pdf)
@@ -505,7 +508,47 @@ class LERFModel(TensoRFModel):
             loss_dict["dino_loss"] = unreduced_dino.sum(dim=-1).nanmean()
         return loss_dict
 
+    def get_image_metrics_and_images(
+        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+    ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
+        image = batch["image"].to(outputs["rgb"].device)
+        rgb = outputs["rgb"]
+        acc = colormaps.apply_colormap(outputs["accumulation"])
+        assert self.config.collider_params is not None
+        depth = colormaps.apply_depth_colormap(
+            outputs["depth"],
+            accumulation=outputs["accumulation"],
+            # near_plane=self.config.collider_params["near_plane"],
+            # far_plane=self.config.collider_params["far_plane"],
+        )
+
+        combined_rgb = torch.cat([image, rgb], dim=1)
+
+        # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
+        image = torch.moveaxis(image, -1, 0)[None, ...]
+        rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
+
+        psnr = self.psnr(image, rgb)
+        ssim = cast(torch.Tensor, self.ssim(image, rgb))
+        lpips = self.lpips(image, rgb)
+
+        metrics_dict = {
+            "psnr": float(psnr.item()),
+            "ssim": float(ssim.item()),
+            "lpips": float(lpips.item()),
+        }
+        images_dict = {"img": combined_rgb, "accumulation": acc, "depth": depth}
+        for i in range(self.config.num_proposal_iterations):
+            key = f"prop_depth_{i}"
+            prop_depth_i = colormaps.apply_depth_colormap(
+                outputs[key],
+                accumulation=outputs["accumulation"],
+            )
+            images_dict[key] = prop_depth_i
+        return metrics_dict, images_dict
+
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = super().get_param_groups()
+        param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
         param_groups["lerf"] = list(self.lerf_field.parameters())
         return param_groups
