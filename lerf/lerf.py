@@ -465,26 +465,26 @@ class LERFModel(TensoRFModel):
         ray_samples_list.append(ray_samples)
         # uniform sampling
         # ray_samples_uniform = self.sampler_uniform(ray_bundle)
-        dens = self.field.get_density(ray_samples)
-        weights = ray_samples.get_weights(dens)
-        weights_list.append(weights)
-        coarse_accumulation = self.renderer_accumulation(weights)
-        acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
+        # dens = self.field.get_density(ray_samples)
+        # weights = ray_samples.get_weights(dens)
+        # weights_list.append(weights)
+        # coarse_accumulation = self.renderer_accumulation(weights)
+        # acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
 
         # pdf sampling
-        ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
+        # ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
         # ray_samples_list.append(ray_samples_pdf)
 
         # fine field:
         field_outputs_fine = self.field.forward(
-            ray_samples_pdf, mask=None, bg_color=None
+            ray_samples, mask=None, bg_color=None
         )
 
-        weights_fine = ray_samples_pdf.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
+        weights_fine = ray_samples.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
         # weights_list.append(weights_fine)
 
         accumulation = self.renderer_accumulation(weights_fine)
-        depth = self.renderer_depth(weights_fine, ray_samples_pdf)
+        depth = self.renderer_depth(weights_fine, ray_samples)
 
         rgb = self.renderer_rgb(
             rgb=field_outputs_fine[FieldHeadNames.RGB],
@@ -493,9 +493,8 @@ class LERFModel(TensoRFModel):
 
         rgb = torch.where(accumulation < 0, colors.WHITE.to(rgb.device), rgb)
         accumulation = torch.clamp(accumulation, min=0)
-
         outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
-        return outputs, weights, ray_samples, weights_list, ray_samples_list
+        return outputs, weights_fine, ray_samples, weights_list, ray_samples_list
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = super().get_loss_dict(outputs, batch, metrics_dict)
