@@ -155,10 +155,6 @@ lerf_method_lite = MethodSpecification(
                 "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
                 "scheduler": None,
             },
-            # "fields": {
-            #     "optimizer": RAdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            #     "scheduler": ExponentialDecaySchedulerConfig(lr_final=1e-3, max_steps=30000),
-            # },
             "fields": {
                 "optimizer": AdamOptimizerConfig(lr=0.001),
                 "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=30000),
