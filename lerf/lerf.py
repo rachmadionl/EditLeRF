@@ -20,7 +20,9 @@ from lerf.lerf_field import LERFField
 from lerf.lerf_fieldheadnames import LERFFieldHeadNames
 from lerf.lerf_renderers import CLIPRenderer, MeanRenderer
 from lerf.tensorf import TensoRFModelConfig, TensoRFModel
-from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig
+from lerf.nerfacto import NerfactoModel, NerfactoModelConfig
+
+
 @dataclass
 class LERFModelConfig(NerfactoModelConfig):
     _target: Type = field(default_factory=lambda: LERFModel)
@@ -112,7 +114,7 @@ class LERFModel(NerfactoModel):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
         ray_samples_list.append(ray_samples)
 
-        nerfacto_field_outputs, outputs, weights = self._get_outputs_nerfacto(ray_samples)
+        outputs, weights = self.get_rgb_depth_acc(ray_samples)
         lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
 
         def gather_fn(tens):
@@ -220,22 +222,6 @@ class LERFModel(NerfactoModel):
             mask = (outputs["relevancy_0"] < 0.5).squeeze()
             outputs[f"composited_{i}"][mask, :] = outputs["rgb"][mask, :]
         return outputs
-
-    def _get_outputs_nerfacto(self, ray_samples: RaySamples):
-        field_outputs = self.field(ray_samples, compute_normals=self.config.predict_normals)
-        weights = ray_samples.get_weights(field_outputs[FieldHeadNames.DENSITY])
-
-        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
-        depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
-        accumulation = self.renderer_accumulation(weights=weights)
-
-        outputs = {
-            "rgb": rgb,
-            "accumulation": accumulation,
-            "depth": depth,
-        }
-
-        return field_outputs, outputs, weights
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = super().get_loss_dict(outputs, batch, metrics_dict)
