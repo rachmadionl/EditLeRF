@@ -141,8 +141,6 @@ class TensoRFModelConfig(ModelConfig):
     """Scales n from 1 to proposal_update_every over this many steps"""
     proposal_update_every: int = 5
     """Sample every n steps after the warmup"""
-    near_plane = 2.0
-    far_plane = 6.0
     predict_normals = False
 
 
