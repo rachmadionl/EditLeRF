@@ -28,7 +28,7 @@ from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-from nerfstudio.cameras.rays import RayBundle
+from nerfstudio.cameras.rays import RaySamples
 from nerfstudio.configs.config_utils import to_immutable_dict
 from nerfstudio.engine.callbacks import (
     TrainingCallback,
@@ -55,6 +55,9 @@ from nerfstudio.model_components.renderers import (
     DepthRenderer,
     RGBRenderer,
 )
+from nerfstudio.field_components.spatial_distortions import SceneContraction
+from nerfstudio.fields.density_fields import HashMLPDensityField
+from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler, UniformSampler
 from nerfstudio.model_components.scene_colliders import AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, colors, misc
@@ -94,6 +97,53 @@ class TensoRFModelConfig(ModelConfig):
     tensorf_encoding: Literal["triplane", "vm", "cp"] = "vm"
     regularization: Literal["none", "l1", "tv"] = "tv"
     """Regularization method used in tensorf paper"""
+    # Proposal Sampler Config
+    proposal_initial_sampler: Literal["piecewise", "uniform"] = "piecewise"
+    """Initial sampler for the proposal network. Piecewise is preferred for unbounded scenes."""
+    interlevel_loss_mult: float = 1.0
+    """Proposal loss multiplier."""
+    distortion_loss_mult: float = 0.002
+    """Distortion loss multiplier."""
+    orientation_loss_mult: float = 0.0001
+    """Orientation loss multiplier on computed normals."""
+    pred_normal_loss_mult: float = 0.001
+    """Predicted normal loss multiplier."""
+    use_proposal_weight_anneal: bool = True
+    """Whether to use proposal weight annealing."""
+    use_average_appearance_embedding: bool = True
+    """Whether to use average appearance embedding or zeros for inference."""
+    proposal_weights_anneal_slope: float = 10.0
+    """Slope of the annealing function for the proposal weights."""
+    proposal_weights_anneal_max_num_iters: int = 1000
+    """Max num iterations for the annealing function."""
+    num_proposal_iterations: int = 2
+    """Scales n from 1 to proposal_update_every over this many steps"""
+    use_same_proposal_network: bool = False
+    """Number of proposal network iterations."""
+    disable_scene_contraction: bool = False
+    """Whether to disable scene contraction or not."""
+    proposal_net_args_list: List[Dict] = field(
+        default_factory=lambda: [
+            {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 128, "use_linear": False},
+            {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 256, "use_linear": False},
+        ]
+    )
+    """Arguments for the proposal density fields."""
+    implementation: Literal["tcnn", "torch"] = "tcnn"
+    """Which implementation to use for the model."""
+    use_single_jitter: bool = True
+    """Whether use single jitter or not for the proposal networks."""
+    num_nerf_samples_per_ray: int = 48
+    """Number of samples per ray for the nerf network."""
+    num_proposal_samples_per_ray: Tuple[int, ...] = (256, 96)
+    """Number of samples per ray for each proposal network."""
+    proposal_warmup: int = 5000
+    """Scales n from 1 to proposal_update_every over this many steps"""
+    proposal_update_every: int = 5
+    """Sample every n steps after the warmup"""
+    near_plane = 2.0
+    far_plane = 6.0
+    predict_normals = False
 
 
 class TensoRFModel(Model):
@@ -173,7 +223,6 @@ class TensoRFModel(Model):
         return callbacks
 
     def update_to_step(self, step: int) -> None:
-        import pdb; pdb.set_trace()
         if step < self.upsampling_iters[0]:
             return
 
@@ -236,6 +285,61 @@ class TensoRFModel(Model):
             use_sh=False,
         )
 
+
+        if self.config.disable_scene_contraction:
+            scene_contraction = None
+        else:
+            scene_contraction = SceneContraction(order=float("inf"))
+
+        self.density_fns = []
+        num_prop_nets = self.config.num_proposal_iterations
+        # Build the proposal network(s)
+        self.proposal_networks = torch.nn.ModuleList()
+        if self.config.use_same_proposal_network:
+            assert len(self.config.proposal_net_args_list) == 1, "Only one proposal network is allowed."
+            prop_net_args = self.config.proposal_net_args_list[0]
+            network = HashMLPDensityField(
+                self.scene_box.aabb,
+                spatial_distortion=scene_contraction,
+                **prop_net_args,
+                implementation=self.config.implementation,
+            )
+            self.proposal_networks.append(network)
+            self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
+        else:
+            for i in range(num_prop_nets):
+                prop_net_args = self.config.proposal_net_args_list[min(i, len(self.config.proposal_net_args_list) - 1)]
+                network = HashMLPDensityField(
+                    self.scene_box.aabb,
+                    spatial_distortion=scene_contraction,
+                    **prop_net_args,
+                    implementation=self.config.implementation,
+                )
+                self.proposal_networks.append(network)
+            self.density_fns.extend([network.density_fn for network in self.proposal_networks])
+
+        # Samplers
+        def update_schedule(step):
+            return np.clip(
+                np.interp(step, [0, self.config.proposal_warmup], [0, self.config.proposal_update_every]),
+                1,
+                self.config.proposal_update_every,
+            )
+
+        # Change proposal network initial sampler if uniform
+        initial_sampler = None  # None is for piecewise as default (see ProposalNetworkSampler)
+        if self.config.proposal_initial_sampler == "uniform":
+            initial_sampler = UniformSampler(single_jitter=self.config.use_single_jitter)
+
+        self.proposal_sampler = ProposalNetworkSampler(
+            num_nerf_samples_per_ray=self.config.num_nerf_samples_per_ray,
+            num_proposal_samples_per_ray=self.config.num_proposal_samples_per_ray,
+            num_proposal_network_iterations=self.config.num_proposal_iterations,
+            single_jitter=self.config.use_single_jitter,
+            update_sched=update_schedule,
+            initial_sampler=initial_sampler,
+        )
+
         # samplers
         self.sampler_uniform = UniformSampler(num_samples=self.config.num_uniform_samples, single_jitter=True)
         self.sampler_pdf = PDFSampler(num_samples=self.config.num_samples, single_jitter=True, include_original=False)
@@ -272,29 +376,34 @@ class TensoRFModel(Model):
         param_groups["encodings"] = list(self.field.color_encoding.parameters()) + list(
             self.field.density_encoding.parameters()
         )
+        param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
 
         return param_groups
 
-    def get_outputs(self, ray_bundle: RayBundle):
+    def get_rgb_depth_acc(self, ray_samples: RaySamples):
+        # ray_samples_list.append(ray_samples)
         # uniform sampling
-        ray_samples_uniform = self.sampler_uniform(ray_bundle)
-        dens = self.field.get_density(ray_samples_uniform)
-        weights = ray_samples_uniform.get_weights(dens)
-        coarse_accumulation = self.renderer_accumulation(weights)
-        acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
+        # ray_samples_uniform = self.sampler_uniform(ray_bundle)
+        # dens = self.field.get_density(ray_samples)
+        # weights = ray_samples.get_weights(dens)
+        # weights_list.append(weights)
+        # coarse_accumulation = self.renderer_accumulation(weights)
+        # acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
 
         # pdf sampling
-        ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples_uniform, weights)
+        # ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
+        # ray_samples_list.append(ray_samples_pdf)
 
         # fine field:
         field_outputs_fine = self.field.forward(
-            ray_samples_pdf, mask=acc_mask, bg_color=colors.WHITE.to(weights.device)
+            ray_samples, mask=None, bg_color=None
         )
 
-        weights_fine = ray_samples_pdf.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
+        weights_fine = ray_samples.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
+        # weights_list.append(weights_fine)
 
         accumulation = self.renderer_accumulation(weights_fine)
-        depth = self.renderer_depth(weights_fine, ray_samples_pdf)
+        depth = self.renderer_depth(weights_fine, ray_samples)
 
         rgb = self.renderer_rgb(
             rgb=field_outputs_fine[FieldHeadNames.RGB],
@@ -303,9 +412,8 @@ class TensoRFModel(Model):
 
         rgb = torch.where(accumulation < 0, colors.WHITE.to(rgb.device), rgb)
         accumulation = torch.clamp(accumulation, min=0)
-
         outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
-        return outputs
+        return outputs, weights_fine
 
     def get_metrics_dict(self, outputs, batch):
         metrics_dict = {}
@@ -352,3 +460,42 @@ class TensoRFModel(Model):
             loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
 
         return loss_dict
+
+    def get_image_metrics_and_images(
+        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+    ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
+        image = batch["image"].to(outputs["rgb"].device)
+        rgb = outputs["rgb"]
+        acc = colormaps.apply_colormap(outputs["accumulation"])
+        assert self.config.collider_params is not None
+        depth = colormaps.apply_depth_colormap(
+            outputs["depth"],
+            accumulation=outputs["accumulation"],
+            # near_plane=self.config.collider_params["near_plane"],
+            # far_plane=self.config.collider_params["far_plane"],
+        )
+
+        combined_rgb = torch.cat([image, rgb], dim=1)
+
+        # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
+        image = torch.moveaxis(image, -1, 0)[None, ...]
+        rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
+
+        psnr = self.psnr(image, rgb)
+        ssim = cast(torch.Tensor, self.ssim(image, rgb))
+        lpips = self.lpips(image, rgb)
+
+        metrics_dict = {
+            "psnr": float(psnr.item()),
+            "ssim": float(ssim.item()),
+            "lpips": float(lpips.item()),
+        }
+        images_dict = {"img": combined_rgb, "accumulation": acc, "depth": depth}
+        for i in range(self.config.num_proposal_iterations):
+            key = f"prop_depth_{i}"
+            prop_depth_i = colormaps.apply_depth_colormap(
+                outputs[key],
+                accumulation=outputs["accumulation"],
+            )
+            images_dict[key] = prop_depth_i
+        return metrics_dict, images_dict

@@ -10,13 +10,10 @@ import nerfacc
 from nerfstudio.cameras.rays import RayBundle, RaySamples
 from nerfstudio.data.scene_box import SceneBox
 from nerfstudio.field_components.field_heads import FieldHeadNames
-from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.model_components.ray_samplers import PDFSampler
 from nerfstudio.model_components.renderers import DepthRenderer
 from nerfstudio.utils.colormaps import ColormapOptions, apply_colormap
 from nerfstudio.viewer.server.viewer_elements import *
-from nerfstudio.fields.density_fields import HashMLPDensityField
-from nerfstudio.model_components.ray_samplers import ProposalNetworkSampler, UniformSampler
 from nerfstudio.model_components.scene_colliders import NearFarCollider
 from nerfstudio.utils import colors, colormaps
 from torch.nn import Parameter
@@ -28,13 +25,10 @@ from lerf.lerf_renderers import CLIPRenderer, MeanRenderer
 
 from lerf.tensorf import TensoRFModelConfig, TensoRFModel
 from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig
-# from nerfstudio.models.mipnerf import MipNerfModel
-# from nerfstudio.models.vanilla_nerf import VanillaModelConfig
-# from lerf.mip_nerfacto import NerfactoModel, NerfactoModelConfig
 
 
 @dataclass
-class LERFModelConfig(TensoRFModelConfig):
+class LERFModelConfig(NerfactoModelConfig):
     _target: Type = field(default_factory=lambda: LERFModel)
     clip_loss_weight: float = 0.1
     n_scales: int = 30
@@ -45,55 +39,9 @@ class LERFModelConfig(TensoRFModelConfig):
     hashgrid_resolutions: Tuple[Tuple[int]] = ((16, 128), (128, 512))
     hashgrid_sizes: Tuple[int] = (19, 19)
     """Arguments for the proposal density fields."""
-    proposal_initial_sampler: Literal["piecewise", "uniform"] = "piecewise"
-    """Initial sampler for the proposal network. Piecewise is preferred for unbounded scenes."""
-    interlevel_loss_mult: float = 1.0
-    """Proposal loss multiplier."""
-    distortion_loss_mult: float = 0.002
-    """Distortion loss multiplier."""
-    orientation_loss_mult: float = 0.0001
-    """Orientation loss multiplier on computed normals."""
-    pred_normal_loss_mult: float = 0.001
-    """Predicted normal loss multiplier."""
-    use_proposal_weight_anneal: bool = True
-    """Whether to use proposal weight annealing."""
-    use_average_appearance_embedding: bool = True
-    """Whether to use average appearance embedding or zeros for inference."""
-    proposal_weights_anneal_slope: float = 10.0
-    """Slope of the annealing function for the proposal weights."""
-    proposal_weights_anneal_max_num_iters: int = 1000
-    """Max num iterations for the annealing function."""
-    num_proposal_iterations: int = 2
-    """Scales n from 1 to proposal_update_every over this many steps"""
-    use_same_proposal_network: bool = False
-    """Number of proposal network iterations."""
-    disable_scene_contraction: bool = False
-    """Whether to disable scene contraction or not."""
-    proposal_net_args_list: List[Dict] = field(
-        default_factory=lambda: [
-            {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 128, "use_linear": False},
-            {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 256, "use_linear": False},
-        ]
-    )
-    """Arguments for the proposal density fields."""
-    implementation: Literal["tcnn", "torch"] = "tcnn"
-    """Which implementation to use for the model."""
-    use_single_jitter: bool = True
-    """Whether use single jitter or not for the proposal networks."""
-    num_nerf_samples_per_ray: int = 48
-    """Number of samples per ray for the nerf network."""
-    num_proposal_samples_per_ray: Tuple[int, ...] = (256, 96)
-    """Number of samples per ray for each proposal network."""
-    proposal_warmup: int = 5000
-    """Scales n from 1 to proposal_update_every over this many steps"""
-    proposal_update_every: int = 5
-    """Sample every n steps after the warmup"""
-    near_plane = 2.0
-    far_plane = 6.0
-    predict_normals = False
 
 
-class LERFModel(TensoRFModel):
+class LERFModel(NerfactoModel):
     config: LERFModelConfig
 
     def populate_modules(self):
@@ -107,60 +55,6 @@ class LERFModel(TensoRFModel):
             self.config.hashgrid_sizes,
             self.config.hashgrid_resolutions,
             clip_n_dims=self.image_encoder.embedding_dim,
-        )
-
-        if self.config.disable_scene_contraction:
-            scene_contraction = None
-        else:
-            scene_contraction = SceneContraction(order=float("inf"))
-
-        self.density_fns = []
-        num_prop_nets = self.config.num_proposal_iterations
-        # Build the proposal network(s)
-        self.proposal_networks = torch.nn.ModuleList()
-        if self.config.use_same_proposal_network:
-            assert len(self.config.proposal_net_args_list) == 1, "Only one proposal network is allowed."
-            prop_net_args = self.config.proposal_net_args_list[0]
-            network = HashMLPDensityField(
-                self.scene_box.aabb,
-                spatial_distortion=scene_contraction,
-                **prop_net_args,
-                implementation=self.config.implementation,
-            )
-            self.proposal_networks.append(network)
-            self.density_fns.extend([network.density_fn for _ in range(num_prop_nets)])
-        else:
-            for i in range(num_prop_nets):
-                prop_net_args = self.config.proposal_net_args_list[min(i, len(self.config.proposal_net_args_list) - 1)]
-                network = HashMLPDensityField(
-                    self.scene_box.aabb,
-                    spatial_distortion=scene_contraction,
-                    **prop_net_args,
-                    implementation=self.config.implementation,
-                )
-                self.proposal_networks.append(network)
-            self.density_fns.extend([network.density_fn for network in self.proposal_networks])
-
-        # Samplers
-        def update_schedule(step):
-            return np.clip(
-                np.interp(step, [0, self.config.proposal_warmup], [0, self.config.proposal_update_every]),
-                1,
-                self.config.proposal_update_every,
-            )
-
-        # Change proposal network initial sampler if uniform
-        initial_sampler = None  # None is for piecewise as default (see ProposalNetworkSampler)
-        if self.config.proposal_initial_sampler == "uniform":
-            initial_sampler = UniformSampler(single_jitter=self.config.use_single_jitter)
-
-        self.proposal_sampler = ProposalNetworkSampler(
-            num_nerf_samples_per_ray=self.config.num_nerf_samples_per_ray,
-            num_proposal_samples_per_ray=self.config.num_proposal_samples_per_ray,
-            num_proposal_network_iterations=self.config.num_proposal_iterations,
-            single_jitter=self.config.use_single_jitter,
-            update_sched=update_schedule,
-            initial_sampler=initial_sampler,
         )
 
         # self.collider = NearFarCollider(near_plane=self.config.near_plane, far_plane=self.config.far_plane)
@@ -221,11 +115,67 @@ class LERFModel(TensoRFModel):
                         n_phrases_sims[j] = pos_prob
         return torch.stack(n_phrases_sims), torch.Tensor(n_phrases_maxs)
 
+    # This is the original implementation of get_outputs (as a reference).
+    def get_outputs(self, ray_bundle: RayBundle):
+        ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
+        ray_samples_list.append(ray_samples)
+
+        nerfacto_field_outputs, outputs, weights = self._get_outputs_nerfacto(ray_samples)
+        lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
+
+        def gather_fn(tens):
+            return torch.gather(tens, -2, best_ids.expand(*best_ids.shape[:-1], tens.shape[-1]))
+
+        dataclass_fn = lambda dc: dc._apply_fn_to_fields(gather_fn, dataclass_fn)
+        lerf_samples = ray_samples._apply_fn_to_fields(gather_fn, dataclass_fn)
+
+        if self.training:
+            clip_scales = ray_bundle.metadata["clip_scales"]
+            clip_scales = clip_scales[..., None]
+            dist = lerf_samples.spacing_to_euclidean_fn(lerf_samples.spacing_starts.squeeze(-1)).unsqueeze(-1)
+            clip_scales = clip_scales * ray_bundle.metadata["width"] * (1 / ray_bundle.metadata["fx"]) * dist
+        else:
+            clip_scales = torch.ones_like(lerf_samples.spacing_starts, device=self.device)
+
+        override_scales = (
+            None if "override_scales" not in ray_bundle.metadata else ray_bundle.metadata["override_scales"]
+        )
+        weights_list.append(weights)
+        if self.training:
+            outputs["weights_list"] = weights_list
+            outputs["ray_samples_list"] = ray_samples_list
+        for i in range(self.config.num_proposal_iterations):
+            outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
+
+        lerf_field_outputs = self.lerf_field.get_outputs(lerf_samples, clip_scales)
+
+        if self.training:
+            outputs["clip"] = self.renderer_clip(
+                embeds=lerf_field_outputs[LERFFieldHeadNames.CLIP], weights=lerf_weights.detach()
+            )
+            outputs["dino"] = self.renderer_mean(
+                embeds=lerf_field_outputs[LERFFieldHeadNames.DINO], weights=lerf_weights.detach()
+            )
+
+        if not self.training:
+            with torch.no_grad():
+                max_across, best_scales = self.get_max_across(
+                    lerf_samples,
+                    lerf_weights,
+                    lerf_field_outputs[LERFFieldHeadNames.HASHGRID],
+                    clip_scales.shape,
+                    preset_scales=override_scales,
+                )
+                outputs["raw_relevancy"] = max_across  # N x B x 1
+                outputs["best_scales"] = best_scales.to(self.device)  # N
+
+        return outputs
+
     # def get_outputs(self, ray_bundle: RayBundle):
     #     ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
     #     ray_samples_list.append(ray_samples)
 
-    #     nerfacto_field_outputs, outputs, weights = self._get_outputs_nerfacto(ray_samples)
+    #     _, outputs, weights = self.get_rgb_depth_acc(ray_samples)
     #     lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
 
     #     def gather_fn(tens):
@@ -276,71 +226,21 @@ class LERFModel(TensoRFModel):
 
     #     return outputs
 
-    def get_outputs(self, ray_bundle: RayBundle):
-        # ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
-        # ray_samples = self.sampler_uniform(ray_bundle)
-        # ray_samples_list.append(ray_bundle)
+    def _get_outputs_nerfacto(self, ray_samples: RaySamples):
+        field_outputs = self.field(ray_samples, compute_normals=self.config.predict_normals)
+        weights = ray_samples.get_weights(field_outputs[FieldHeadNames.DENSITY])
 
-        # ray_bundle = self.collider(ray_bundle)
-        # ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
-        # ray_samples_list.append(ray_samples)
+        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
+        depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
+        accumulation = self.renderer_accumulation(weights=weights)
 
-        # nerfacto_field_outputs, outputs, weights = self._get_outputs_nerfacto(ray_samples)
-        # outputs, weights_list, ray_samples_list, weights, ray_samples = self._get_outputs_mipnerf(ray_bundle)
-        outputs, weights, ray_samples, weights_list, ray_samples_list = self._get_outputs_tensorf(ray_bundle,
-                                                                                                  self.density_fns)
-        # outputs, weights, _, _, _ = self._get_outputs_instant_ngp(ray_bundle)
-        lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
-        # import pdb; pdb.set_trace()
+        outputs = {
+            "rgb": rgb,
+            "accumulation": accumulation,
+            "depth": depth,
+        }
 
-
-        def gather_fn(tens):
-            return torch.gather(tens, -2, best_ids.expand(*best_ids.shape[:-1], tens.shape[-1]))
-
-        dataclass_fn = lambda dc: dc._apply_fn_to_fields(gather_fn, dataclass_fn)
-        lerf_samples = ray_samples._apply_fn_to_fields(gather_fn, dataclass_fn)
-
-        if self.training:
-            clip_scales = ray_bundle.metadata["clip_scales"]
-            clip_scales = clip_scales[..., None]
-            dist = lerf_samples.spacing_to_euclidean_fn(lerf_samples.spacing_starts.squeeze(-1)).unsqueeze(-1)
-            clip_scales = clip_scales * ray_bundle.metadata["width"] * (1 / ray_bundle.metadata["fx"]) * dist
-        else:
-            clip_scales = torch.ones_like(lerf_samples.spacing_starts, device=self.device)
-
-        override_scales = (
-            None if "override_scales" not in ray_bundle.metadata else ray_bundle.metadata["override_scales"]
-        )
-        weights_list.append(weights)
-        if self.training:
-            outputs["weights_list"] = weights_list
-            outputs["ray_samples_list"] = ray_samples_list
-        for i in range(self.config.num_proposal_iterations):
-            outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
-
-        lerf_field_outputs = self.lerf_field.get_outputs(lerf_samples, clip_scales)
-
-        if self.training:
-            outputs["clip"] = self.renderer_clip(
-                embeds=lerf_field_outputs[LERFFieldHeadNames.CLIP], weights=lerf_weights.detach()
-            )
-            outputs["dino"] = self.renderer_mean(
-                embeds=lerf_field_outputs[LERFFieldHeadNames.DINO], weights=lerf_weights.detach()
-            )
-
-        if not self.training:
-            with torch.no_grad():
-                max_across, best_scales = self.get_max_across(
-                    lerf_samples,
-                    lerf_weights,
-                    lerf_field_outputs[LERFFieldHeadNames.HASHGRID],
-                    clip_scales.shape,
-                    preset_scales=override_scales,
-                )
-                outputs["raw_relevancy"] = max_across  # N x B x 1
-                outputs["best_scales"] = best_scales.to(self.device)  # N
-
-        return outputs
+        return field_outputs, outputs, weights
 
     @torch.no_grad()
     def get_outputs_for_camera_ray_bundle(self, camera_ray_bundle: RayBundle) -> Dict[str, torch.Tensor]:
@@ -400,102 +300,6 @@ class LERFModel(TensoRFModel):
             outputs[f"composited_{i}"][mask, :] = outputs["rgb"][mask, :]
         return outputs
 
-    def _get_outputs_nerfacto(self, ray_samples: RaySamples):
-        field_outputs = self.field(ray_samples, compute_normals=self.config.predict_normals)
-        weights = ray_samples.get_weights(field_outputs[FieldHeadNames.DENSITY])
-
-        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
-        depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
-        accumulation = self.renderer_accumulation(weights=weights)
-
-        outputs = {
-            "rgb": rgb,
-            "accumulation": accumulation,
-            "depth": depth,
-        }
-
-        return field_outputs, outputs, weights
-
-    def _get_outputs_mipnerf(self, ray_bundle):
-        weights_list = []
-        ray_samples_list = []
-
-        # uniform sampling
-        ray_samples = self.sampler_uniform(ray_bundle)
-        ray_samples_list.append(ray_samples)
-
-        # First pass:
-        field_outputs_coarse = self.field.forward(ray_samples)
-        weights_coarse = ray_samples.get_weights(field_outputs_coarse[FieldHeadNames.DENSITY])
-        weights_list.append(weights_coarse)
-        rgb_coarse = self.renderer_rgb(
-            rgb=field_outputs_coarse[FieldHeadNames.RGB],
-            weights=weights_coarse,
-        )
-        accumulation_coarse = self.renderer_accumulation(weights_coarse)
-        depth_coarse = self.renderer_depth(weights_coarse, ray_samples)
-
-        # pdf sampling
-        ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights_coarse)
-        ray_samples_list.append(ray_samples_pdf)
-
-        # Second pass:
-        field_outputs_fine = self.field.forward(ray_samples_pdf)
-        weights_fine = ray_samples_pdf.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
-        weights_list.append(weights_fine)
-        rgb_fine = self.renderer_rgb(
-            rgb=field_outputs_fine[FieldHeadNames.RGB],
-            weights=weights_fine,
-        )
-        accumulation_fine = self.renderer_accumulation(weights_fine)
-        depth_fine = self.renderer_depth(weights_fine, ray_samples_pdf)
-
-        outputs = {
-            "rgb_coarse": rgb_coarse,
-            "rgb_fine": rgb_fine,
-            "accumulation_coarse": accumulation_coarse,
-            "accumulation_fine": accumulation_fine,
-            "depth_coarse": depth_coarse,
-            "depth_fine": depth_fine,
-        }
-        return outputs, weights_list, ray_samples_list, weights_fine, ray_samples_pdf
-
-    def _get_outputs_tensorf(self, ray_bundle: RayBundle, density_fns):
-        ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
-        ray_samples_list.append(ray_samples)
-        # uniform sampling
-        # ray_samples_uniform = self.sampler_uniform(ray_bundle)
-        # dens = self.field.get_density(ray_samples)
-        # weights = ray_samples.get_weights(dens)
-        # weights_list.append(weights)
-        # coarse_accumulation = self.renderer_accumulation(weights)
-        # acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
-
-        # pdf sampling
-        # ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
-        # ray_samples_list.append(ray_samples_pdf)
-
-        # fine field:
-        field_outputs_fine = self.field.forward(
-            ray_samples, mask=None, bg_color=None
-        )
-
-        weights_fine = ray_samples.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
-        # weights_list.append(weights_fine)
-
-        accumulation = self.renderer_accumulation(weights_fine)
-        depth = self.renderer_depth(weights_fine, ray_samples)
-
-        rgb = self.renderer_rgb(
-            rgb=field_outputs_fine[FieldHeadNames.RGB],
-            weights=weights_fine,
-        )
-
-        rgb = torch.where(accumulation < 0, colors.WHITE.to(rgb.device), rgb)
-        accumulation = torch.clamp(accumulation, min=0)
-        outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
-        return outputs, weights_fine, ray_samples, weights_list, ray_samples_list
-
     def get_loss_dict(self, outputs, batch, metrics_dict=None):
         loss_dict = super().get_loss_dict(outputs, batch, metrics_dict)
         if self.training:
@@ -507,47 +311,7 @@ class LERFModel(TensoRFModel):
             loss_dict["dino_loss"] = unreduced_dino.sum(dim=-1).nanmean()
         return loss_dict
 
-    def get_image_metrics_and_images(
-        self, outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
-    ) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
-        image = batch["image"].to(outputs["rgb"].device)
-        rgb = outputs["rgb"]
-        acc = colormaps.apply_colormap(outputs["accumulation"])
-        assert self.config.collider_params is not None
-        depth = colormaps.apply_depth_colormap(
-            outputs["depth"],
-            accumulation=outputs["accumulation"],
-            # near_plane=self.config.collider_params["near_plane"],
-            # far_plane=self.config.collider_params["far_plane"],
-        )
-
-        combined_rgb = torch.cat([image, rgb], dim=1)
-
-        # Switch images from [H, W, C] to [1, C, H, W] for metrics computations
-        image = torch.moveaxis(image, -1, 0)[None, ...]
-        rgb = torch.moveaxis(rgb, -1, 0)[None, ...]
-
-        psnr = self.psnr(image, rgb)
-        ssim = cast(torch.Tensor, self.ssim(image, rgb))
-        lpips = self.lpips(image, rgb)
-
-        metrics_dict = {
-            "psnr": float(psnr.item()),
-            "ssim": float(ssim.item()),
-            "lpips": float(lpips.item()),
-        }
-        images_dict = {"img": combined_rgb, "accumulation": acc, "depth": depth}
-        for i in range(self.config.num_proposal_iterations):
-            key = f"prop_depth_{i}"
-            prop_depth_i = colormaps.apply_depth_colormap(
-                outputs[key],
-                accumulation=outputs["accumulation"],
-            )
-            images_dict[key] = prop_depth_i
-        return metrics_dict, images_dict
-
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = super().get_param_groups()
-        param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
         param_groups["lerf"] = list(self.lerf_field.parameters())
         return param_groups
