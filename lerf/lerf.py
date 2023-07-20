@@ -28,7 +28,7 @@ from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig
 
 
 @dataclass
-class LERFModelConfig(NerfactoModelConfig):
+class LERFModelConfig(TensoRFModelConfig):
     _target: Type = field(default_factory=lambda: LERFModel)
     clip_loss_weight: float = 0.1
     n_scales: int = 30
@@ -41,7 +41,7 @@ class LERFModelConfig(NerfactoModelConfig):
     """Arguments for the proposal density fields."""
 
 
-class LERFModel(NerfactoModel):
+class LERFModel(TensoRFModel):
     config: LERFModelConfig
 
     def populate_modules(self):
