@@ -24,7 +24,6 @@ from lerf.lerf_fieldheadnames import LERFFieldHeadNames
 from lerf.lerf_renderers import CLIPRenderer, MeanRenderer
 
 from lerf.tensorf import TensoRFModelConfig, TensoRFModel
-from nerfstudio.models.nerfacto import NerfactoModel, NerfactoModelConfig
 
 
 @dataclass
@@ -115,12 +114,11 @@ class LERFModel(TensoRFModel):
                         n_phrases_sims[j] = pos_prob
         return torch.stack(n_phrases_sims), torch.Tensor(n_phrases_maxs)
 
-    # This is the original implementation of get_outputs (as a reference).
     def get_outputs(self, ray_bundle: RayBundle):
         ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
         ray_samples_list.append(ray_samples)
 
-        nerfacto_field_outputs, outputs, weights = self._get_outputs_nerfacto(ray_samples)
+        outputs, weights = self.get_rgb_depth_acc(ray_samples)
         lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
 
         def gather_fn(tens):
@@ -170,77 +168,6 @@ class LERFModel(TensoRFModel):
                 outputs["best_scales"] = best_scales.to(self.device)  # N
 
         return outputs
-
-    # def get_outputs(self, ray_bundle: RayBundle):
-    #     ray_samples, weights_list, ray_samples_list = self.proposal_sampler(ray_bundle, density_fns=self.density_fns)
-    #     ray_samples_list.append(ray_samples)
-
-    #     _, outputs, weights = self.get_rgb_depth_acc(ray_samples)
-    #     lerf_weights, best_ids = torch.topk(weights, self.config.num_lerf_samples, dim=-2, sorted=False)
-
-    #     def gather_fn(tens):
-    #         return torch.gather(tens, -2, best_ids.expand(*best_ids.shape[:-1], tens.shape[-1]))
-
-    #     dataclass_fn = lambda dc: dc._apply_fn_to_fields(gather_fn, dataclass_fn)
-    #     lerf_samples = ray_samples._apply_fn_to_fields(gather_fn, dataclass_fn)
-
-    #     if self.training:
-    #         clip_scales = ray_bundle.metadata["clip_scales"]
-    #         clip_scales = clip_scales[..., None]
-    #         dist = lerf_samples.spacing_to_euclidean_fn(lerf_samples.spacing_starts.squeeze(-1)).unsqueeze(-1)
-    #         clip_scales = clip_scales * ray_bundle.metadata["width"] * (1 / ray_bundle.metadata["fx"]) * dist
-    #     else:
-    #         clip_scales = torch.ones_like(lerf_samples.spacing_starts, device=self.device)
-
-    #     override_scales = (
-    #         None if "override_scales" not in ray_bundle.metadata else ray_bundle.metadata["override_scales"]
-    #     )
-    #     weights_list.append(weights)
-    #     if self.training:
-    #         outputs["weights_list"] = weights_list
-    #         outputs["ray_samples_list"] = ray_samples_list
-    #     for i in range(self.config.num_proposal_iterations):
-    #         outputs[f"prop_depth_{i}"] = self.renderer_depth(weights=weights_list[i], ray_samples=ray_samples_list[i])
-
-    #     lerf_field_outputs = self.lerf_field.get_outputs(lerf_samples, clip_scales)
-
-    #     if self.training:
-    #         outputs["clip"] = self.renderer_clip(
-    #             embeds=lerf_field_outputs[LERFFieldHeadNames.CLIP], weights=lerf_weights.detach()
-    #         )
-    #         outputs["dino"] = self.renderer_mean(
-    #             embeds=lerf_field_outputs[LERFFieldHeadNames.DINO], weights=lerf_weights.detach()
-    #         )
-
-    #     if not self.training:
-    #         with torch.no_grad():
-    #             max_across, best_scales = self.get_max_across(
-    #                 lerf_samples,
-    #                 lerf_weights,
-    #                 lerf_field_outputs[LERFFieldHeadNames.HASHGRID],
-    #                 clip_scales.shape,
-    #                 preset_scales=override_scales,
-    #             )
-    #             outputs["raw_relevancy"] = max_across  # N x B x 1
-    #             outputs["best_scales"] = best_scales.to(self.device)  # N
-
-    #     return outputs
-
-    def _get_outputs_nerfacto(self, ray_samples: RaySamples):
-        field_outputs = self.field(ray_samples, compute_normals=self.config.predict_normals)
-        weights = ray_samples.get_weights(field_outputs[FieldHeadNames.DENSITY])
-
-        rgb = self.renderer_rgb(rgb=field_outputs[FieldHeadNames.RGB], weights=weights)
-        depth = self.renderer_depth(weights=weights, ray_samples=ray_samples)
-        accumulation = self.renderer_accumulation(weights=weights)
-
-        outputs = {
-            "rgb": rgb,
-            "accumulation": accumulation,
-            "depth": depth,
-        }
-
-        return field_outputs, outputs, weights
 
     @torch.no_grad()
     def get_outputs_for_camera_ray_bundle(self, camera_ray_bundle: RayBundle) -> Dict[str, torch.Tensor]:
