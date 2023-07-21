@@ -28,7 +28,7 @@ from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
-from nerfstudio.cameras.rays import RaySamples
+from nerfstudio.cameras.rays import RayBundle, RaySamples
 from nerfstudio.configs.config_utils import to_immutable_dict
 from nerfstudio.engine.callbacks import (
     TrainingCallback,
@@ -345,7 +345,8 @@ class TensoRFModel(Model):
         self.sampler_pdf = PDFSampler(num_samples=self.config.num_samples, single_jitter=True, include_original=False)
 
         # renderers
-        self.renderer_rgb = RGBRenderer(background_color="random")
+        # self.renderer_rgb = RGBRenderer(background_color="random")
+        self.renderer_rgb = RGBRenderer(background_color=colors.WHITE)
         self.renderer_accumulation = AccumulationRenderer()
         self.renderer_depth = DepthRenderer()
 
@@ -380,30 +381,62 @@ class TensoRFModel(Model):
 
         return param_groups
 
-    def get_rgb_depth_acc(self, ray_samples: RaySamples):
-        # ray_samples_list.append(ray_samples)
+    # def get_rgb_depth_acc(self, ray_bundle: RayBundle, ray_samples: RaySamples):
+    #     # ray_samples_list.append(ray_samples)
+    #     # uniform sampling
+    #     # ray_samples_uniform = self.sampler_uniform(ray_bundle)
+    #     dens = self.field.get_density(ray_samples)
+    #     weights = ray_samples.get_weights(dens)
+    #     coarse_accumulation = self.renderer_accumulation(weights)
+    #     acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
+
+    #     # pdf sampling
+    #     ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
+
+    #     # fine field:
+    #     # field_outputs_fine = self.field.forward(
+    #     #     ray_samples, mask=None, bg_color=None
+    #     # )
+
+    #     field_outputs_fine = self.field.forward(
+    #         ray_samples, mask=acc_mask, bg_color=colors.WHITE.to(weights.device)
+    #     )
+
+    #     weights_fine = ray_samples_pdf.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
+
+    #     accumulation = self.renderer_accumulation(weights_fine)
+    #     depth = self.renderer_depth(weights_fine, ray_samples_pdf)
+
+    #     rgb = self.renderer_rgb(
+    #         rgb=field_outputs_fine[FieldHeadNames.RGB],
+    #         weights=weights_fine,
+    #     )
+
+    #     rgb = torch.where(accumulation < 0, colors.WHITE.to(rgb.device), rgb)
+    #     accumulation = torch.clamp(accumulation, min=0)
+    #     outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
+    #     return outputs, weights
+
+    def get_rgb_depth_acc(self, ray_bundle: RayBundle, ray_samples: RaySamples):
         # uniform sampling
-        # ray_samples_uniform = self.sampler_uniform(ray_bundle)
-        # dens = self.field.get_density(ray_samples)
-        # weights = ray_samples.get_weights(dens)
-        # weights_list.append(weights)
-        # coarse_accumulation = self.renderer_accumulation(weights)
-        # acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
+        # ray_samples = self.sampler_uniform(ray_bundle)
+        dens = self.field.get_density(ray_samples)
+        weights = ray_samples.get_weights(dens)
+        coarse_accumulation = self.renderer_accumulation(weights)
+        acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
 
         # pdf sampling
-        # ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
-        # ray_samples_list.append(ray_samples_pdf)
+        ray_samples_pdf = self.sampler_pdf(ray_bundle, ray_samples, weights)
 
         # fine field:
         field_outputs_fine = self.field.forward(
-            ray_samples, mask=None, bg_color=None
+            ray_samples_pdf, mask=acc_mask, bg_color=colors.WHITE.to(weights.device)
         )
 
-        weights_fine = ray_samples.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
-        # weights_list.append(weights_fine)
+        weights_fine = ray_samples_pdf.get_weights(field_outputs_fine[FieldHeadNames.DENSITY])
 
         accumulation = self.renderer_accumulation(weights_fine)
-        depth = self.renderer_depth(weights_fine, ray_samples)
+        depth = self.renderer_depth(weights_fine, ray_samples_pdf)
 
         rgb = self.renderer_rgb(
             rgb=field_outputs_fine[FieldHeadNames.RGB],
@@ -412,8 +445,9 @@ class TensoRFModel(Model):
 
         rgb = torch.where(accumulation < 0, colors.WHITE.to(rgb.device), rgb)
         accumulation = torch.clamp(accumulation, min=0)
+
         outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
-        return outputs, weights_fine
+        return outputs, weights
 
     def get_metrics_dict(self, outputs, batch):
         metrics_dict = {}
@@ -471,8 +505,8 @@ class TensoRFModel(Model):
         depth = colormaps.apply_depth_colormap(
             outputs["depth"],
             accumulation=outputs["accumulation"],
-            # near_plane=self.config.collider_params["near_plane"],
-            # far_plane=self.config.collider_params["far_plane"],
+            near_plane=self.config.collider_params["near_plane"],
+            far_plane=self.config.collider_params["far_plane"],
         )
 
         combined_rgb = torch.cat([image, rgb], dim=1)
