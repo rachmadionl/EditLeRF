@@ -83,26 +83,26 @@ class LERFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         clip_cache_path = Path(osp.join(cache_dir, f"clip_{self.image_encoder.name}"))
         dino_cache_path = Path(osp.join(cache_dir, "dino.npy"))
         # NOTE: cache config is sensitive to list vs. tuple, because it checks for dict equality
-        self.dino_dataloader = DinoDataloader(
-            image_list=images,
-            device=self.device,
-            cfg={"image_shape": list(images.shape[2:4])},
-            cache_path=dino_cache_path,
-        )
-        torch.cuda.empty_cache()
-        self.clip_interpolator = PyramidEmbeddingDataloader(
-            image_list=images,
-            device=self.device,
-            cfg={
-                "tile_size_range": [0.05, 0.5],
-                "tile_size_res": 7,
-                "stride_scaler": 0.5,
-                "image_shape": list(images.shape[2:4]),
-                "model_name": self.image_encoder.name,
-            },
-            cache_path=clip_cache_path,
-            model=self.image_encoder,
-        )
+        # self.dino_dataloader = DinoDataloader(
+        #     image_list=images,
+        #     device=self.device,
+        #     cfg={"image_shape": list(images.shape[2:4])},
+        #     cache_path=dino_cache_path,
+        # )
+        # torch.cuda.empty_cache()
+        # self.clip_interpolator = PyramidEmbeddingDataloader(
+        #     image_list=images,
+        #     device=self.device,
+        #     cfg={
+        #         "tile_size_range": [0.05, 0.5],
+        #         "tile_size_res": 7,
+        #         "stride_scaler": 0.5,
+        #         "image_shape": list(images.shape[2:4]),
+        #         "model_name": self.image_encoder.name,
+        #     },
+        #     cache_path=clip_cache_path,
+        #     model=self.image_encoder,
+        # )
 
     def next_train(self, step: int) -> Tuple[RayBundle, Dict]:
         """Returns the next batch of data from the train dataloader."""
@@ -112,9 +112,9 @@ class LERFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         batch = self.train_pixel_sampler.sample(image_batch)
         ray_indices = batch["indices"]
         ray_bundle = self.train_ray_generator(ray_indices)
-        batch["clip"], clip_scale = self.clip_interpolator(ray_indices)
-        batch["dino"] = self.dino_dataloader(ray_indices)
-        ray_bundle.metadata["clip_scales"] = clip_scale
+        # batch["clip"], clip_scale = self.clip_interpolator(ray_indices)
+        # batch["dino"] = self.dino_dataloader(ray_indices)
+        # ray_bundle.metadata["clip_scales"] = clip_scale
         # assume all cameras have the same focal length and image width
         ray_bundle.metadata["fx"] = self.train_dataset.cameras[0].fx.item()
         ray_bundle.metadata["width"] = self.train_dataset.cameras[0].width.item()

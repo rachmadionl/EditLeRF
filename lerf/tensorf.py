@@ -179,6 +179,7 @@ class TensoRFModel(Model):
             .astype("int")
             .tolist()[1:]
         )
+        print(f"========== THE PROMPT IS {self.prompt} ========")
         super().__init__(config=config, **kwargs)
 
     def get_training_callbacks(

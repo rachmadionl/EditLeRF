@@ -38,10 +38,15 @@ class LERFModelConfig(TensoRFModelConfig):
     hashgrid_resolutions: Tuple[Tuple[int]] = ((16, 128), (128, 512))
     hashgrid_sizes: Tuple[int] = (19, 19)
     """Arguments for the proposal density fields."""
+    prompt: str = "Here's your prompt!"
 
 
 class LERFModel(TensoRFModel):
     config: LERFModelConfig
+
+    def __init__(self, config: TensoRFModelConfig, **kwargs) -> None:
+        self.prompt = config.prompt
+        super().__init__(config, **kwargs)
 
     def populate_modules(self):
         super().populate_modules()
@@ -127,13 +132,13 @@ class LERFModel(TensoRFModel):
         dataclass_fn = lambda dc: dc._apply_fn_to_fields(gather_fn, dataclass_fn)
         lerf_samples = ray_samples._apply_fn_to_fields(gather_fn, dataclass_fn)
 
-        if self.training:
-            clip_scales = ray_bundle.metadata["clip_scales"]
-            clip_scales = clip_scales[..., None]
-            dist = lerf_samples.spacing_to_euclidean_fn(lerf_samples.spacing_starts.squeeze(-1)).unsqueeze(-1)
-            clip_scales = clip_scales * ray_bundle.metadata["width"] * (1 / ray_bundle.metadata["fx"]) * dist
-        else:
-            clip_scales = torch.ones_like(lerf_samples.spacing_starts, device=self.device)
+        # if self.training:
+        #     clip_scales = ray_bundle.metadata["clip_scales"]
+        #     clip_scales = clip_scales[..., None]
+        #     dist = lerf_samples.spacing_to_euclidean_fn(lerf_samples.spacing_starts.squeeze(-1)).unsqueeze(-1)
+        #     clip_scales = clip_scales * ray_bundle.metadata["width"] * (1 / ray_bundle.metadata["fx"]) * dist
+        # else:
+        #     clip_scales = torch.ones_like(lerf_samples.spacing_starts, device=self.device)
 
         override_scales = (
             None if "override_scales" not in ray_bundle.metadata else ray_bundle.metadata["override_scales"]
