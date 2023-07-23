@@ -62,6 +62,8 @@ from nerfstudio.model_components.scene_colliders import AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, colors, misc
 
+from lerf.clip_encoding import ClipEncoding
+
 
 @dataclass
 class TensoRFModelConfig(ModelConfig):
@@ -161,6 +163,7 @@ class TensoRFModel(Model):
         **kwargs,
     ) -> None:
         print(f"final resolution is {config.final_resolution}")
+        self.train_clip = config.train_clip
         self.init_resolution = config.init_resolution
         self.upsampling_iters = config.upsampling_iters
         self.num_den_components = config.num_den_components
@@ -271,6 +274,11 @@ class TensoRFModel(Model):
         else:
             raise ValueError(f"Encoding {self.config.tensorf_encoding} not supported")
 
+        self.text_features = None
+        if self.train_clip:
+            self.clip = ClipEncoding()
+            self.text_features = self.clip.encode_text(self.prompt)
+
         feature_encoding = NeRFEncoding(in_dim=self.appearance_dim, num_frequencies=2, min_freq_exp=0, max_freq_exp=2)
         direction_encoding = NeRFEncoding(in_dim=3, num_frequencies=2, min_freq_exp=0, max_freq_exp=2)
 
@@ -284,6 +292,7 @@ class TensoRFModel(Model):
             head_mlp_num_layers=2,
             head_mlp_layer_width=128,
             use_sh=False,
+            use_text_features=self.text_features
         )
 
 
@@ -370,15 +379,18 @@ class TensoRFModel(Model):
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = {}
 
-        param_groups["fields"] = (
-            list(self.field.mlp_head.parameters())
-            + list(self.field.B.parameters())
-            + list(self.field.field_output_rgb.parameters())
-        )
-        param_groups["encodings"] = list(self.field.color_encoding.parameters()) + list(
-            self.field.density_encoding.parameters()
-        )
-        param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
+        if self.train_clip:
+            param_groups["appearance_mapper"] = list(self.field.appearance_mapper.parameters())
+        else:
+            param_groups["fields"] = (
+                list(self.field.mlp_head.parameters())
+                + list(self.field.B.parameters())
+                + list(self.field.field_output_rgb.parameters())
+            )
+            param_groups["encodings"] = list(self.field.color_encoding.parameters()) + list(
+                self.field.density_encoding.parameters()
+            )
+            param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
 
         return param_groups
 
@@ -494,6 +506,12 @@ class TensoRFModel(Model):
             assert metrics_dict is not None and "distortion" in metrics_dict
             loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
 
+        if self.train_clip:
+            from math import sqrt
+            spatial_size = int(sqrt(outputs["rgb"].shape[0]))
+            outputs["rgb_clip"] = outputs["rgb"].view(spatial_size, spatial_size, 3)
+            outputs["rgb_clip"] = outputs["rgb_clip"].permute(2, 0, 1).unsqueeze(0)
+            loss_dict["clip_loss"] = self.clip.clip_loss(self.text_features, outputs["rgb_clip"])
         return loss_dict
 
     def get_image_metrics_and_images(
