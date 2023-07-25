@@ -18,12 +18,17 @@ TensorRF implementation.
 
 from __future__ import annotations
 
+from math import sqrt
 from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Tuple, Type, cast
 
+import clip
+import kornia
 import numpy as np
 import torch
+# torch.autograd.set_detect_anomaly(True)
 from torch.nn import Parameter
+from torchmetrics.multimodal import CLIPScore
 from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -62,7 +67,7 @@ from nerfstudio.model_components.scene_colliders import AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, colors, misc
 
-from lerf.clip_encoding import ClipEncoding
+from lerf.clip_encoding import ClipEncoding, CLIPLoss
 
 
 @dataclass
@@ -80,6 +85,7 @@ class TensoRFModelConfig(ModelConfig):
     loss_coefficients: Dict[str, float] = to_immutable_dict(
         {
             "rgb_loss": 1.0,
+            "clip_loss": 1.0,
             "tv_reg_density": 1e-3,
             "tv_reg_color": 1e-4,
             "l1_reg": 5e-4,
@@ -182,7 +188,6 @@ class TensoRFModel(Model):
             .astype("int")
             .tolist()[1:]
         )
-        print(f"========== THE PROMPT IS {self.prompt} ========")
         super().__init__(config=config, **kwargs)
 
     def get_training_callbacks(
@@ -276,8 +281,9 @@ class TensoRFModel(Model):
 
         self.text_features = None
         if self.train_clip:
-            self.clip = ClipEncoding()
-            self.text_features = self.clip.encode_text(self.prompt)
+            self.clip_loss = CLIPLoss()
+            self.text_features = torch.cat([clip.tokenize(self.prompt)]).to('cuda')
+            # self.text_tgt = self.clip.encode_text(self.prompt_tgt)
 
         feature_encoding = NeRFEncoding(in_dim=self.appearance_dim, num_frequencies=2, min_freq_exp=0, max_freq_exp=2)
         direction_encoding = NeRFEncoding(in_dim=3, num_frequencies=2, min_freq_exp=0, max_freq_exp=2)
@@ -292,9 +298,8 @@ class TensoRFModel(Model):
             head_mlp_num_layers=2,
             head_mlp_layer_width=128,
             use_sh=False,
-            use_text_features=self.text_features
+            train_clip=self.train_clip,
         )
-
 
         if self.config.disable_scene_contraction:
             scene_contraction = None
@@ -380,7 +385,14 @@ class TensoRFModel(Model):
         param_groups = {}
 
         if self.train_clip:
-            param_groups["appearance_mapper"] = list(self.field.appearance_mapper.parameters())
+            param_groups["fields"] = (
+                list(self.field.mlp_head.parameters())
+                # + list(self.field.B.parameters())
+                + list(self.field.field_output_rgb.parameters())
+                # + list(self.field.appearance_mapper.parameters())
+            )
+            # param_groups["encodings"] = list(self.field.color_encoding.parameters())
+            # param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
         else:
             param_groups["fields"] = (
                 list(self.field.mlp_head.parameters())
@@ -465,53 +477,91 @@ class TensoRFModel(Model):
     def get_metrics_dict(self, outputs, batch):
         metrics_dict = {}
         image = batch["image"].to(self.device)
-        metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
-        if self.training:
-            metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
+        if self.train_clip:
+            spatial_size = int(sqrt(outputs["rgb"].shape[0]))
+            outputs["rgb_gray"] = outputs["rgb"].view(spatial_size, spatial_size, 3)
+            outputs["rgb_gray"] = outputs["rgb_gray"].permute(2, 0, 1).unsqueeze(0)
+            image_gray = image.view(spatial_size, spatial_size, 3)
+            image_gray = image_gray.permute(2, 0, 1).unsqueeze(0)
+            image_gray = kornia.color.rgb_to_grayscale(image_gray)
+            outputs["rgb_gray"] = kornia.color.rgb_to_grayscale(outputs["rgb_gray"])
+            metrics_dict["psnr"] = self.psnr(outputs["rgb_gray"], image_gray)
+        else:
+            metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
+            if self.training:
+                metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
         return metrics_dict
 
     def get_loss_dict(self, outputs, batch, metrics_dict=None) -> Dict[str, torch.Tensor]:
         # Scaling metrics by coefficients to create the losses.
         device = outputs["rgb"].device
         image = batch["image"].to(device)
-
-        rgb_loss = self.rgb_loss(image, outputs["rgb"])
-
-        loss_dict = {"rgb_loss": rgb_loss}
-
-        if self.config.regularization == "l1":
-            l1_parameters = []
-            for parameter in self.field.density_encoding.parameters():
-                l1_parameters.append(parameter.view(-1))
-            loss_dict["l1_reg"] = torch.abs(torch.cat(l1_parameters)).mean()
-        elif self.config.regularization == "tv":
-            density_plane_coef = self.field.density_encoding.plane_coef
-            color_plane_coef = self.field.color_encoding.plane_coef
-            assert isinstance(color_plane_coef, torch.Tensor) and isinstance(
-                density_plane_coef, torch.Tensor
-            ), "TV reg only supported for TensoRF encoding types with plane_coef attribute"
-            loss_dict["tv_reg_density"] = tv_loss(density_plane_coef)
-            loss_dict["tv_reg_color"] = tv_loss(color_plane_coef)
-        elif self.config.regularization == "none":
-            pass
-        else:
-            raise ValueError(f"Regularization {self.config.regularization} not supported")
-
-        loss_dict = misc.scale_dict(loss_dict, self.config.loss_coefficients)
-
-        if self.training:
-            loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
-                outputs["weights_list"], outputs["ray_samples_list"]
-            )
-            assert metrics_dict is not None and "distortion" in metrics_dict
-            loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
+        loss_dict = {}
 
         if self.train_clip:
-            from math import sqrt
             spatial_size = int(sqrt(outputs["rgb"].shape[0]))
-            outputs["rgb_clip"] = outputs["rgb"].view(spatial_size, spatial_size, 3)
-            outputs["rgb_clip"] = outputs["rgb_clip"].permute(2, 0, 1).unsqueeze(0)
-            loss_dict["clip_loss"] = self.clip.clip_loss(self.text_features, outputs["rgb_clip"])
+            outputs["rgb"] = outputs["rgb"].view(spatial_size, spatial_size, 3)
+            outputs["rgb"] = outputs["rgb"].permute(2, 0, 1).unsqueeze(0)
+            image = image.view(spatial_size, spatial_size, 3)
+            image = image.permute(2, 0, 1).unsqueeze(0)
+            image_gray = kornia.color.rgb_to_grayscale(image)
+            outputs["rgb_gray"] = kornia.color.rgb_to_grayscale(outputs["rgb"])
+            loss_dict["rgb_loss"] = self.rgb_loss(image_gray, outputs["rgb_gray"])
+            loss_dict["clip_loss"] = self.clip_loss(outputs["rgb"], self.text_features)
+
+            if self.config.regularization == "l1":
+                l1_parameters = []
+                for parameter in self.field.density_encoding.parameters():
+                    l1_parameters.append(parameter.view(-1))
+                loss_dict["l1_reg"] = torch.abs(torch.cat(l1_parameters)).mean()
+            elif self.config.regularization == "tv":
+                color_plane_coef = self.field.color_encoding.plane_coef
+                assert isinstance(color_plane_coef, torch.Tensor)
+                loss_dict["tv_reg_color"] = tv_loss(color_plane_coef)
+            elif self.config.regularization == "none":
+                pass
+            else:
+                raise ValueError(f"Regularization {self.config.regularization} not supported")
+
+            loss_dict = misc.scale_dict(loss_dict, self.config.loss_coefficients)
+
+            # if self.training:
+            #     loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
+            #         outputs["weights_list"], outputs["ray_samples_list"]
+            #     )
+            #     assert metrics_dict is not None and "distortion" in metrics_dict
+            #     loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
+        else:
+            rgb_loss = self.rgb_loss(image, outputs["rgb"])
+
+            loss_dict = {"rgb_loss": rgb_loss}
+
+            if self.config.regularization == "l1":
+                l1_parameters = []
+                for parameter in self.field.density_encoding.parameters():
+                    l1_parameters.append(parameter.view(-1))
+                loss_dict["l1_reg"] = torch.abs(torch.cat(l1_parameters)).mean()
+            elif self.config.regularization == "tv":
+                density_plane_coef = self.field.density_encoding.plane_coef
+                color_plane_coef = self.field.color_encoding.plane_coef
+                assert isinstance(color_plane_coef, torch.Tensor) and isinstance(
+                    density_plane_coef, torch.Tensor
+                ), "TV reg only supported for TensoRF encoding types with plane_coef attribute"
+                loss_dict["tv_reg_density"] = tv_loss(density_plane_coef)
+                loss_dict["tv_reg_color"] = tv_loss(color_plane_coef)
+            elif self.config.regularization == "none":
+                pass
+            else:
+                raise ValueError(f"Regularization {self.config.regularization} not supported")
+
+            loss_dict = misc.scale_dict(loss_dict, self.config.loss_coefficients)
+
+            if self.training:
+                loss_dict["interlevel_loss"] = self.config.interlevel_loss_mult * interlevel_loss(
+                    outputs["weights_list"], outputs["ray_samples_list"]
+                )
+                assert metrics_dict is not None and "distortion" in metrics_dict
+                loss_dict["distortion_loss"] = self.config.distortion_loss_mult * metrics_dict["distortion"]
         return loss_dict
 
     def get_image_metrics_and_images(

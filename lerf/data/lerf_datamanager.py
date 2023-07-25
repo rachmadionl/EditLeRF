@@ -17,6 +17,7 @@ Datamanager.
 """
 
 from __future__ import annotations
+from math import sqrt, exp
 
 import os.path as osp
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from nerfstudio.data.utils.nerfstudio_collate import nerfstudio_collate
 from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttributes
 from nerfstudio.model_components.ray_generators import RayGenerator
 from nerfstudio.utils.misc import IterableWrapper
+from nerfstudio.data.pixel_samplers import PatchPixelSampler
 from rich.progress import Console
 
 CONSOLE = Console(width=120)
@@ -70,6 +72,7 @@ class LERFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         test_mode: Literal["test", "val", "inference"] = "val",
         world_size: int = 1,
         local_rank: int = 0,
+        sample_size: int = 60,
         **kwargs,  # pylint: disable=unused-argument
     ):
         super().__init__(
@@ -79,6 +82,9 @@ class LERFDataManager(VanillaDataManager):  # pylint: disable=abstract-method
         images = [self.train_dataset[i]["image"].permute(2, 0, 1)[None, ...] for i in range(len(self.train_dataset))]
         images = torch.cat(images)
 
+        self.sample_size = sample_size
+        self.train_pixel_sampler = PatchPixelSampler(config.train_num_rays_per_batch, patch_size=self.sample_size)
+        self.eval_pixel_sampler = PatchPixelSampler(config.eval_num_rays_per_batch, patch_size=self.sample_size)
         cache_dir = f"outputs/{self.config.dataparser.data.name}"
         clip_cache_path = Path(osp.join(cache_dir, f"clip_{self.image_encoder.name}"))
         dino_cache_path = Path(osp.join(cache_dir, "dino.npy"))

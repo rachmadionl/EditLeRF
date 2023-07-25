@@ -54,8 +54,10 @@ class TensoRFField(Field):
         # whether to use spherical harmonics as the feature decoding function
         sh_levels: int = 2,
         # number of levels to use for spherical harmonics
-        use_text_features: Optional[torch.Tensor] = None
-        # whether to train appearance mapper
+        train_clip: bool = False,
+        # whether to train color stylization
+        text_features: Optional[torch.Tensor] = None,
+        # whether to use appearance mapper
     ) -> None:
         super().__init__()
         self.aabb = Parameter(aabb, requires_grad=False)
@@ -63,10 +65,8 @@ class TensoRFField(Field):
         self.direction_encoding = direction_encoding
         self.density_encoding = density_encoding
         self.color_encoding = color_encoding
-        
-        if use_text_features is not None:
-            self.train_clip = True
-            self.text_features = use_text_features
+        self.train_clip = train_clip
+        self.text_features = text_features
 
         self.mlp_head = MLP(
             in_dim=appearance_dim + 3 + self.direction_encoding.get_out_dim() + self.feature_encoding.get_out_dim(),
@@ -90,21 +90,33 @@ class TensoRFField(Field):
         self.field_output_rgb = RGBFieldHead(in_dim=self.mlp_head.get_out_dim(), activation=nn.Sigmoid())
 
         if self.train_clip:
-            self.appearance_mapper = MLP(
-                in_dim=512,
-                num_layers=2,
-                layer_width=128,
-                out_dim=appearance_dim,
-                activation=nn.ReLU(),
-                out_activation=nn.ReLU(),
-            )
-            self.mlp_head = self.mlp_head.eval()
+            if self.text_features is not None:
+                self.appearance_mapper = MLP(
+                    in_dim=512,
+                    num_layers=2,
+                    layer_width=128,
+                    out_dim=appearance_dim,
+                    activation=nn.ReLU(),
+                    out_activation=nn.ReLU(),
+                )
+            # self.mlp_head = self.mlp_head.eval()
+            # self.field_output_rgb = self.field_output_rgb.eval()
             self.B = self.B.eval()
-            self.field_output_rgb = self.field_output_rgb.eval()
+            self.color_encoding = self.color_encoding.eval()
             self.feature_encoding = self.feature_encoding.eval()
             self.direction_encoding = self.direction_encoding.eval()
             self.density_encoding = self.density_encoding.eval()
-            self.color_encoding = self.color_encoding.eval()
+
+            for param in self.B.parameters():
+                param.requires_grad = False
+            for param in self.color_encoding.parameters():
+                param.requires_grad = False
+            for param in self.feature_encoding.parameters():
+                param.requires_grad = False
+            for param in self.direction_encoding.parameters():
+                param.requires_grad = False
+            for param in self.density_encoding.parameters():
+                param.requires_grad = False
 
     def get_density(self, ray_samples: RaySamples) -> Tensor:
         positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
@@ -122,11 +134,11 @@ class TensoRFField(Field):
         rgb_features = self.color_encoding(positions)
         rgb_features = self.B(rgb_features)
 
-        if self.train_clip:
-            if self.text_features.dtype == torch.float16:
-                self.appearance_mapper = self.appearance_mapper.half()
+        if self.text_features is not None:
+            import pdb; pdb.set_trace()
             color_features = self.appearance_mapper(self.text_features)
             rgb_features = rgb_features + color_features
+
         if self.use_sh:
             sh_mult = self.sh(d)[:, :, None]
             rgb_sh = rgb_features.view(sh_mult.shape[0], sh_mult.shape[1], 3, sh_mult.shape[-1])
@@ -165,9 +177,11 @@ class TensoRFField(Field):
                 base_density[mask] = density
                 base_rgb[mask] = rgb
 
-                if not self.train_clip:
-                    base_density.requires_grad_()
+                if self.train_clip:
                     base_rgb.requires_grad_()
+                else:
+                    base_rgb.requires_grad_()
+                    base_density.requires_grad_()
 
             density = base_density
             rgb = base_rgb
@@ -175,7 +189,7 @@ class TensoRFField(Field):
             if self.train_clip:
                 with torch.no_grad():
                     density = self.get_density(ray_samples)
-                    rgb = self.get_outputs(ray_samples, None)
+                rgb = self.get_outputs(ray_samples, None)
             else:
                 density = self.get_density(ray_samples)
                 rgb = self.get_outputs(ray_samples, None)

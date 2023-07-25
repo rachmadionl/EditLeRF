@@ -39,7 +39,7 @@ class LERFModelConfig(TensoRFModelConfig):
     hashgrid_sizes: Tuple[int] = (19, 19)
     """Arguments for the proposal density fields."""
     train_clip: str = True
-    prompt: str = "Here's your prompt!"
+    prompt: str = "Prompt Source"
 
 
 class LERFModel(TensoRFModel):
