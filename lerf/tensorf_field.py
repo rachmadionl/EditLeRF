@@ -96,27 +96,8 @@ class TensoRFField(Field):
                     num_layers=2,
                     layer_width=128,
                     out_dim=appearance_dim,
-                    activation=nn.ReLU(),
-                    out_activation=nn.ReLU(),
+                    activation=nn.ReLU()
                 )
-            # self.mlp_head = self.mlp_head.eval()
-            # self.field_output_rgb = self.field_output_rgb.eval()
-            self.B = self.B.eval()
-            self.color_encoding = self.color_encoding.eval()
-            self.feature_encoding = self.feature_encoding.eval()
-            self.direction_encoding = self.direction_encoding.eval()
-            self.density_encoding = self.density_encoding.eval()
-
-            for param in self.B.parameters():
-                param.requires_grad = False
-            for param in self.color_encoding.parameters():
-                param.requires_grad = False
-            for param in self.feature_encoding.parameters():
-                param.requires_grad = False
-            for param in self.direction_encoding.parameters():
-                param.requires_grad = False
-            for param in self.density_encoding.parameters():
-                param.requires_grad = False
 
     def get_density(self, ray_samples: RaySamples) -> Tensor:
         positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
@@ -135,7 +116,6 @@ class TensoRFField(Field):
         rgb_features = self.B(rgb_features)
 
         if self.text_features is not None:
-            import pdb; pdb.set_trace()
             color_features = self.appearance_mapper(self.text_features)
             rgb_features = rgb_features + color_features
 
@@ -166,32 +146,19 @@ class TensoRFField(Field):
             base_rgb = bg_color.repeat(ray_samples[:, :, None].shape)
             if mask.any():
                 input_rays = ray_samples[mask, :]
-                if self.train_clip:
-                    with torch.no_grad():
-                        density = self.get_density(input_rays)
-                    rgb = self.get_outputs(input_rays, None).type(torch.float32)
-                else:
-                    density = self.get_density(input_rays)
-                    rgb = self.get_outputs(input_rays, None).type(torch.float32)
+                density = self.get_density(input_rays)
+                rgb = self.get_outputs(input_rays, None).type(torch.float32)
 
                 base_density[mask] = density
                 base_rgb[mask] = rgb
 
-                if self.train_clip:
-                    base_rgb.requires_grad_()
-                else:
-                    base_rgb.requires_grad_()
-                    base_density.requires_grad_()
+                base_rgb.requires_grad_()
+                base_density.requires_grad_()
 
             density = base_density
             rgb = base_rgb
         else:
-            if self.train_clip:
-                with torch.no_grad():
-                    density = self.get_density(ray_samples)
-                rgb = self.get_outputs(ray_samples, None)
-            else:
-                density = self.get_density(ray_samples)
-                rgb = self.get_outputs(ray_samples, None)
+            density = self.get_density(ray_samples)
+            rgb = self.get_outputs(ray_samples, None)
 
         return {FieldHeadNames.DENSITY: density, FieldHeadNames.RGB: rgb}

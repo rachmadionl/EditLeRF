@@ -67,7 +67,7 @@ from nerfstudio.model_components.scene_colliders import AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, colors, misc
 
-from lerf.clip_encoding import ClipEncoding, CLIPLoss
+from lerf.clip_encoding import ClipEncoding
 
 
 @dataclass
@@ -281,9 +281,16 @@ class TensoRFModel(Model):
 
         self.text_features = None
         if self.train_clip:
-            self.clip_loss = CLIPLoss()
-            self.text_features = torch.cat([clip.tokenize(self.prompt)]).to('cuda')
-            # self.text_tgt = self.clip.encode_text(self.prompt_tgt)
+            self.clip_loss = ClipEncoding()
+            # self.text_features = torch.cat([clip.tokenize(self.prompt)]).to('cuda')
+            if ';' in self.prompt:
+                prompt_src, prompt_tgt = self.prompt.split(";")
+                self.text_src = self.clip_loss.encode_text(prompt_src)
+                self.text_tgt = self.clip_loss.encode_text(prompt_tgt)
+                text_features = self.text_tgt
+            else:
+                self.text_features = self.clip_loss.encode_text(self.prompt)
+                text_features = self.text_features
 
         feature_encoding = NeRFEncoding(in_dim=self.appearance_dim, num_frequencies=2, min_freq_exp=0, max_freq_exp=2)
         direction_encoding = NeRFEncoding(in_dim=3, num_frequencies=2, min_freq_exp=0, max_freq_exp=2)
@@ -299,6 +306,7 @@ class TensoRFModel(Model):
             head_mlp_layer_width=128,
             use_sh=False,
             train_clip=self.train_clip,
+            # text_features=text_features,
         )
 
         if self.config.disable_scene_contraction:
@@ -387,11 +395,14 @@ class TensoRFModel(Model):
         if self.train_clip:
             param_groups["fields"] = (
                 list(self.field.mlp_head.parameters())
-                # + list(self.field.B.parameters())
                 + list(self.field.field_output_rgb.parameters())
-                # + list(self.field.appearance_mapper.parameters())
+                # + list(self.field.B.parameters())
             )
-            # param_groups["encodings"] = list(self.field.color_encoding.parameters())
+            # param_groups["appearance_mapper"] = list(self.field.appearance_mapper.parameters())
+            # param_groups["encodings"] = (
+            #     list(self.field.color_encoding.parameters())
+            #     # + list(self.field.density_encoding.parameters())
+            # )
             # param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
         else:
             param_groups["fields"] = (
@@ -486,6 +497,8 @@ class TensoRFModel(Model):
             image_gray = kornia.color.rgb_to_grayscale(image_gray)
             outputs["rgb_gray"] = kornia.color.rgb_to_grayscale(outputs["rgb_gray"])
             metrics_dict["psnr"] = self.psnr(outputs["rgb_gray"], image_gray)
+            # if self.training:
+            #     metrics_dict["distortion"] = distortion_loss(outputs["weights_list"], outputs["ray_samples_list"])
         else:
             metrics_dict["psnr"] = self.psnr(outputs["rgb"], image)
             if self.training:
@@ -507,7 +520,11 @@ class TensoRFModel(Model):
             image_gray = kornia.color.rgb_to_grayscale(image)
             outputs["rgb_gray"] = kornia.color.rgb_to_grayscale(outputs["rgb"])
             loss_dict["rgb_loss"] = self.rgb_loss(image_gray, outputs["rgb_gray"])
-            loss_dict["clip_loss"] = self.clip_loss(outputs["rgb"], self.text_features)
+            if ';' in self.prompt:
+                loss_dict["clip_loss"] = self.clip_loss(outputs["rgb"], self.text_tgt,
+                                                        image, self.text_src)
+            else:
+                loss_dict["clip_loss"] = self.clip_loss(outputs["rgb"], self.text_features)
 
             if self.config.regularization == "l1":
                 l1_parameters = []
@@ -515,8 +532,10 @@ class TensoRFModel(Model):
                     l1_parameters.append(parameter.view(-1))
                 loss_dict["l1_reg"] = torch.abs(torch.cat(l1_parameters)).mean()
             elif self.config.regularization == "tv":
+                # density_plane_coef = self.field.density_encoding.plane_coef
                 color_plane_coef = self.field.color_encoding.plane_coef
                 assert isinstance(color_plane_coef, torch.Tensor)
+                # loss_dict["tv_reg_density"] = tv_loss(density_plane_coef)
                 loss_dict["tv_reg_color"] = tv_loss(color_plane_coef)
             elif self.config.regularization == "none":
                 pass
