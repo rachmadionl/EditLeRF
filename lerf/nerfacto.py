@@ -33,7 +33,6 @@ from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttrib
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.field_components.spatial_distortions import SceneContraction
 from nerfstudio.fields.density_fields import HashMLPDensityField
-from nerfstudio.fields.nerfacto_field import NerfactoField
 from nerfstudio.model_components.losses import (
     MSELoss,
     distortion_loss,
@@ -48,6 +47,8 @@ from nerfstudio.model_components.scene_colliders import NearFarCollider
 from nerfstudio.model_components.shaders import NormalsShader
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps
+
+from lerf.nerfacto_field import NerfactoField
 
 
 @dataclass
@@ -235,7 +236,11 @@ class NerfactoModel(Model):
     def get_param_groups(self) -> Dict[str, List[Parameter]]:
         param_groups = {}
         param_groups["proposal_networks"] = list(self.proposal_networks.parameters())
-        param_groups["fields"] = list(self.field.parameters())
+        param_groups["fields"] = (
+            list(self.field.mlp_base_grid.parameters())
+            + list(self.field.mlp_base_mlp.parameters())
+            + list(self.field.mlp_head.parameters())
+        )
         return param_groups
 
     def get_training_callbacks(
